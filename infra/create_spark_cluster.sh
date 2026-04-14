@@ -27,8 +27,15 @@ set -euo pipefail
 
 PROFILE="ilya-ubc-aws-student"
 REGION="ca-central-1"
-KEY_NAME="mds-ilya-ec2"          # your EC2 key pair name
+KEY_NAME="mds-ilya-ec2"
 LOG_BUCKET="s3://dsci525-data-2026/emr-logs/"
+BOOTSTRAP_SCRIPT="s3://dsci525-data-2026/scripts/bootstrap_spark.sh"
+
+# --- Upload bootstrap script to S3 ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "Uploading bootstrap script to S3..."
+aws s3 cp "${SCRIPT_DIR}/bootstrap_spark.sh" "${BOOTSTRAP_SCRIPT}" \
+    --profile "${PROFILE}" --region "${REGION}"
 
 # --- Auto-discover a public subnet ---
 # Looks for subnets with "public" (case-insensitive) in their Name tag.
@@ -52,17 +59,18 @@ if [ -z "${SUBNET_ID:-}" ]; then
     echo "${SUBNETS}"
     echo ""
 
-    # Pick the first one
     SUBNET_ID=$(echo "${SUBNETS}" | head -1 | awk '{print $1}')
     echo "Using: ${SUBNET_ID}"
 fi
 
 echo ""
 echo "Creating 3-node EMR cluster (1 primary + 2 core, m6a.xlarge)..."
+# No JupyterHub: Docker Hub rate limits break it on EMR 7.x.
+# Livy is included for potential EMR Studio use.
 CLUSTER_ID=$(aws emr create-cluster \
   --name "sql-demo-spark" \
   --release-label emr-7.8.0 \
-  --applications Name=Spark Name=JupyterHub Name=Livy \
+  --applications Name=Spark Name=Livy \
   --instance-groups '[
     {"InstanceGroupType":"MASTER","InstanceType":"m6a.xlarge","InstanceCount":1,
      "EbsConfiguration":{"EbsBlockDeviceConfigs":[{"VolumeSpecification":{"VolumeType":"gp3","SizeInGB":32},"VolumesPerInstance":1}]}},
@@ -70,8 +78,8 @@ CLUSTER_ID=$(aws emr create-cluster \
      "EbsConfiguration":{"EbsBlockDeviceConfigs":[{"VolumeSpecification":{"VolumeType":"gp3","SizeInGB":32},"VolumesPerInstance":1}]}}
   ]' \
   --ec2-attributes "KeyName=${KEY_NAME},SubnetId=${SUBNET_ID}" \
+  --bootstrap-actions "[{\"Path\":\"${BOOTSTRAP_SCRIPT}\",\"Name\":\"install-deps\"}]" \
   --log-uri "${LOG_BUCKET}" \
-  --managed-scaling-policy '{"ComputeLimit":{"UnitType":"Instances","MinimumCapacityUnits":2,"MaximumCapacityUnits":2}}' \
   --profile "${PROFILE}" \
   --region "${REGION}" \
   --query 'ClusterId' --output text)
@@ -79,14 +87,21 @@ CLUSTER_ID=$(aws emr create-cluster \
 echo ""
 echo "Cluster ID: ${CLUSTER_ID}"
 echo ""
-echo "Check status:"
+echo "Check status (repeat until WAITING, ~8 min):"
 echo "  aws emr describe-cluster --cluster-id ${CLUSTER_ID} --query 'Cluster.Status.State' --profile ${PROFILE} --region ${REGION}"
 echo ""
-echo "Get primary node DNS (once WAITING):"
-echo "  aws emr describe-cluster --cluster-id ${CLUSTER_ID} --query 'Cluster.MasterPublicDnsName' --output text --profile ${PROFILE} --region ${REGION}"
+echo "Get primary node private IP (once WAITING):"
+echo "  aws emr list-instances --cluster-id ${CLUSTER_ID} --instance-group-types MASTER --query 'Instances[0].PrivateIpAddress' --output text --profile ${PROFILE} --region ${REGION}"
 echo ""
-echo "SSH in:"
-echo "  ssh -i ~/.ssh/${KEY_NAME}.pem hadoop@<primary-dns>"
+echo "Add to ~/.ssh/config:"
+echo "  Host emr-primary"
+echo "      HostName <private-ip>"
+echo "      User hadoop"
+echo "      IdentityFile ~/mds/${KEY_NAME}.pem"
+echo "      ProxyJump gateway"
+echo "      LocalForward 4040 localhost:4040"
+echo "      LocalForward 18080 localhost:18080"
+echo "      LocalForward 8088 localhost:8088"
 echo ""
-echo "REMEMBER to terminate when done:"
+echo "REMEMBER to terminate when done (\$0.71/hr):"
 echo "  aws emr terminate-clusters --cluster-ids ${CLUSTER_ID} --profile ${PROFILE} --region ${REGION}"

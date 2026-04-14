@@ -228,11 +228,12 @@ aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
     --profile ilya-ubc-aws-student --region ca-central-1
 ```
 
-**Step 4.** Get the primary node DNS:
+**Step 4.** Get the primary node private IP (we connect through the gateway, so we need the VPC-internal address):
 
 ```bash
-aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
-    --query 'Cluster.MasterPublicDnsName' --output text \
+aws emr list-instances --cluster-id j-XXXXXXXXXXXXX \
+    --instance-group-types MASTER \
+    --query 'Instances[0].PrivateIpAddress' --output text \
     --profile ilya-ubc-aws-student --region ca-central-1
 ```
 
@@ -240,11 +241,16 @@ aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
 
 ```
 Host emr-primary
-    HostName <primary-dns-from-step-4>
+    HostName <private-ip-from-step-4>
     User hadoop
     IdentityFile ~/mds/mds-ilya-ec2.pem
     ProxyJump gateway
+    LocalForward 4040 localhost:4040
+    LocalForward 18080 localhost:18080
+    LocalForward 8088 localhost:8088
 ```
+
+The `LocalForward` lines tunnel the Spark UI (4040), History Server (18080), and YARN ResourceManager (8088) to your laptop automatically on connect.
 
 **Step 6.** Verify the connection:
 
@@ -259,10 +265,11 @@ Use this time to show the [infrastructure overview diagram](infra.qmd#architectu
 
 ## Part 2: SparkSQL on EMR (~20 min) {#part2}
 
-**Step 1.** Clone the repo on the EMR primary node (git is pre-installed on Amazon Linux):
+**Step 1.** Install git, clone the repo on the EMR primary node:
 
 ```bash
 ssh emr-primary
+sudo yum install -y git
 git clone https://github.com/ilyamusabirov/525next-steps.git
 cd 525next-steps/demos/sql-on-cluster
 ```
