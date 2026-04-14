@@ -232,7 +232,7 @@ The script uploads the bootstrap (installs numpy + git on all nodes), auto-disco
 
 ```
 Host emr-primary
-    HostName <private-ip-from-step-4>
+    HostName <private-ip-from-script-output>
     User hadoop
     IdentityFile ~/mds/mds-ilya-ec2.pem
     ProxyJump gateway
@@ -297,6 +297,10 @@ Same query as DuckDB Query 1: count reviews per category. Only 4 groups, so the 
 Spark is **slower** here. Cluster overhead: YARN job scheduling, task serialization, shuffle coordination. For a trivial 4-group aggregation, this overhead dominates. DuckDB runs in-process with no coordination.
 :::
 
+#### Filter + sort: Spark ~5s vs DuckDB ~14s
+
+Same top-20 most-helpful query. Spark distributes the top-k selection across executors, then merges the per-executor top-20 lists on the driver.
+
 #### GROUP BY 10M products: Spark ~32s vs DuckDB ~52s
 
 Same 10M-product aggregation. The hash table is distributed across executors, each holding a slice. 8 executor cores read S3 in parallel vs DuckDB's 4 threads on one machine.
@@ -308,6 +312,10 @@ Spark is **faster** here. 8 executor cores (2 core nodes x 4 vCPU) read S3 in pa
 #### GROUP BY + WINDOW: Spark ~27s vs DuckDB ~74s
 
 Top 10 most-reviewed products per category. Two expensive operators: GROUP BY builds a distributed hash table, then ROW_NUMBER() runs a window sort on each category partition. 2.7x faster: distributed memory and parallelism win on complex queries.
+
+#### Cross-category join: Spark ~13s vs DuckDB ~19s
+
+Same DISTINCT + JOIN query. Spark builds two distributed DISTINCT sets, then hash-joins them across the cluster.
 
 #### GROUP BY 50M users: the query DuckDB couldn't do
 
@@ -356,19 +364,17 @@ SparkSQL for feature engineering chained with MLlib for training. Same cluster, 
 ### Script: `05_spark_fail.py`
 
 ```bash
-spark-submit 05_spark_fail.py 2>/dev/null
+spark-submit 05_spark_fail.py
 ```
+
+Do NOT suppress stderr here: the whole point is to see the error messages.
 
 Two intentional failures to show how to read Spark error messages and find logs:
 
-1. **Column typo** (`review_score` instead of `rating`): Spark catches this at query planning time before scanning any data. The AnalysisException tells you exactly which column is missing.
-2. **Executor OOM**: force all data to one partition with `REPARTITION(1)`, then `COLLECT_LIST` every review title per user. One executor gets everything, runs out of heap, crashes.
+1. **Column typo** (`review_score` instead of `rating`): Spark catches this at query planning time before scanning any data. The AnalysisException tells you exactly which column is missing. Look at driver stderr, Spark UI SQL tab.
+2. **Executor OOM**: force all data to one partition with `REPARTITION(1)`, then `COLLECT_LIST` every review title per user. One executor gets everything, runs out of heap, crashes. Look at Spark UI Stages tab, executor logs.
 
-::: {.callout-tip icon="false" title="Talking points"}
-Two intentional failures:
-
-1. **Column typo** (`review_score` instead of `rating`): `AnalysisException`. Look at driver stderr, Spark UI SQL tab.
-2. **Executor OOM** (`REPARTITION(1)` + `COLLECT_LIST`): simulates data skew. Look at Spark UI Stages tab, executor logs.
+::: {.callout-tip icon="false" title="Where to find logs"}
 
 Where to find logs:
 
