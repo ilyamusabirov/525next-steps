@@ -19,6 +19,7 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder \
     .appName("Intentional-Failure") \
     .getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
 
 # %% [markdown]
 # ## Failure 1: Reference a non-existent column

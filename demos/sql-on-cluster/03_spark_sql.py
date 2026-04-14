@@ -25,6 +25,7 @@ import time
 spark = SparkSession.builder \
     .appName("SQL-Demo") \
     .getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
 
 S3 = "s3://dsci525-data-2026/amazon_reviews/"
 

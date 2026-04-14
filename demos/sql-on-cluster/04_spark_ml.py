@@ -18,6 +18,7 @@ import time
 spark = SparkSession.builder \
     .appName("ReviewFeatures-ML") \
     .getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
 
 df = spark.read.parquet("s3://dsci525-data-2026/amazon_reviews/")
 df.createOrReplaceTempView("reviews")
