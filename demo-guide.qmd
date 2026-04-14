@@ -271,12 +271,12 @@ The demo compares DuckDB on a **t3a.xlarge** (4 vCPU, 16 GB, \$0.15/hr) against 
 |---|---|---|---|
 | vCPU | 4 | 4 | 8 effective (2 core nodes x 4) |
 | Usable memory | 4 GB (constrained) | 12 GB | ~20 GB across executors |
-| S3 read bandwidth | 1 NIC | 1 NIC | 3 NICs |
+| S3 read bandwidth | 1 network connection | 1 network connection | 3 network connections |
 | Cost | \$0.15/hr | \$0.15/hr | \$0.71/hr |
 
 **Where more memory helps (but more CPU doesn't):** GROUP BY + WINDOW goes from 62s (4 GB, spilling) to 22s (12 GB, no spill) on the same 4 vCPU. Spark at 27s is slower than DuckDB at 12 GB despite having 2x the cores. The bottleneck was disk spill, not CPU.
 
-**Where more CPU helps (but more memory doesn't):** Category summary goes from 18s (4 GB) to 15s (12 GB) with extra memory, but Spark does it in 7s. The query is trivial compute: 4 hash table entries. The difference is S3 read parallelism: 8 cores across 3 NICs fetch parquet files faster than 4 cores on 1 NIC.
+**Where more CPU helps (but more memory doesn't):** Category summary goes from 18s (4 GB) to 15s (12 GB) with extra memory, but Spark does it in 7s. The query is trivial compute: 4 hash table entries. The difference is S3 read parallelism: 8 cores across 3 parallel network connections fetch parquet files faster than 4 cores on 1.
 
 **A fairer single-machine comparison** would be a t3a.2xlarge (8 vCPU, 32 GB, \$0.30/hr), which matches Spark's core count and has plenty of memory. DuckDB would likely beat Spark on every query at that price point. The cluster costs 2.4x more and only wins on raw I/O throughput.
 
@@ -286,7 +286,7 @@ DuckDB on a t3a.2xlarge (8 vCPU, 32 GB RAM, \$0.30/hr) would handle every query 
 
 **Tradeoffs that favor distributed engines (Spark, Trino, Hadoop):**
 
-1. **S3 read parallelism.** One machine has one NIC. Three nodes have three times the network throughput. For scan-heavy queries on hundreds of GB+, this is the first bottleneck you hit. More CPU on a single machine does not help here.
+1. **S3 read parallelism.** One machine has one network connection. Three nodes have three times the network throughput. For scan-heavy queries on hundreds of GB+, this is the first bottleneck you hit. More CPU on a single machine does not help here.
 2. **Dataset size beyond ~1 to 10 TB.** Single-node engines handle 1 TB comfortably. Beyond 10 TB, one machine runs out of disk I/O regardless of RAM. Hadoop MapReduce was built for this scale; Spark improved on it with in-memory caching and DAG execution. Newer engines like [Daft](https://www.getdaft.io/) and [Ray](https://www.ray.io/) target similar scale for ML workloads.
 3. **Fault tolerance.** If a DuckDB query fails 2 hours in, you start over. Spark's lineage lets another executor retry a failed task without restarting the job.
 4. **Elastic fleet management.** EMR Spark can run task instances on Spot pricing and replace them when reclaimed. Scaling a single DuckDB machine up and down is harder to automate.
@@ -388,11 +388,11 @@ spark-submit 03_spark_sql.py 2>/dev/null
 #### Category summary: Spark ~7s vs DuckDB ~18s
 
 ::: {.callout-note collapse="true" title="Before: what we're doing"}
-Same query as DuckDB Query 1: count reviews per category. Only 4 groups. Watch the timing: Spark is faster here despite the trivial compute, because it reads S3 with more parallelism (8 cores, 3 NICs).
+Same query as DuckDB Query 1: count reviews per category. Only 4 groups. Watch the timing: Spark is faster here despite the trivial compute, because it reads S3 with more parallelism (8 cores, 3 network connections).
 :::
 
 ::: {.callout-tip collapse="true" title="After: results and performance"}
-Spark is **faster** here (~7s vs ~18s) despite the trivial aggregation. The query has only 4 hash table entries: zero compute pressure. The difference is pure S3 read speed: 8 cores across 3 NICs vs 4 cores on 1 NIC. DuckDB at 12 GB is still ~15s: more memory doesn't help because the bottleneck is network, not spill.
+Spark is **faster** here (~7s vs ~18s) despite the trivial aggregation. The query has only 4 hash table entries: zero compute pressure. The difference is pure S3 read speed: 8 cores across 3 network connections vs 4 cores on 1 network connection. DuckDB at 12 GB is still ~15s: more memory doesn't help because the bottleneck is network, not spill.
 :::
 
 #### Filter + sort: Spark ~5s vs DuckDB ~8s
@@ -464,7 +464,7 @@ In the Spark UI:
 | GROUP BY + WINDOW | ~62s | ~22s | ~27s |
 | GROUP BY 50M users | ~80s (spilling) | ~52s | runs |
 
-Both DuckDB columns run on **1 machine, 4 vCPU**. Spark has **8 effective cores across 3 NICs**. Two confounds: memory and I/O parallelism. The "4 GB, low-resource" column is intentionally constrained: heavier queries spill to disk, making DuckDB look slower than it is. At 12 GB (default on a 16 GB machine), DuckDB matches or beats Spark on compute-heavy queries. Spark still wins on scan-heavy queries (category summary) thanks to 3x network throughput.
+Both DuckDB columns run on **1 machine, 4 vCPU**. Spark has **8 effective cores across 3 network connections**. Two confounds: memory and I/O parallelism. The "4 GB, low-resource" column is intentionally constrained: heavier queries spill to disk, making DuckDB look slower than it is. At 12 GB (default on a 16 GB machine), DuckDB matches or beats Spark on compute-heavy queries. Spark still wins on scan-heavy queries (category summary) thanks to 3x network throughput.
 
 The 50M-user GROUP BY works fine at 12 GB. The OOM in the demo happens only when we also disable spill-to-disk.
 
