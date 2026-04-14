@@ -94,6 +94,10 @@ Then reload the VS Code window (Cmd+Shift+P > "Reload Window").
 
 ## Part 1: DuckDB on EC2 (~20 min) {#part1}
 
+::: {.callout-note collapse="true" title="Before: framing for students"}
+This is a **data lake** setup: files on S3, no database, schema applied at query time. In a warehouse you'd write `SELECT * FROM reviews`. Here you write `read_parquet('s3://...')` because the parquet files *are* the data. DuckDB, Spark, and Trino are all different engines that read those same files. We start with the simplest one.
+:::
+
 ### Script: `01_duckdb_s3.py`
 
 Open in VS Code. Run each cell.
