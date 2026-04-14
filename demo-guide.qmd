@@ -16,18 +16,19 @@ bash infra/create_gateway.sh
 
 The script auto-discovers the AMI, public subnet, and security group, launches a `t3a.xlarge` (16 GB RAM) with the S3 instance profile attached, waits for it to start, and prints the public IP and SSH command.
 
-**Step 2.** Copy the demo scripts to the instance and run the setup:
+**Step 2.** SSH into the instance, clone the repo, and run the setup:
 
 ```bash
-scp -i ~/mds/mds-ilya-ec2.pem -r demos/sql-on-cluster ubuntu@<public-ip>:~/sql-on-cluster
 ssh -i ~/mds/mds-ilya-ec2.pem ubuntu@<public-ip>
-cd sql-on-cluster
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/ilyamusabirov/525next-steps.git
+cd 525next-steps/demos/sql-on-cluster
 bash setup.sh
 ```
 
 `setup.sh` installs uv, syncs packages (duckdb, boto3, ipykernel), registers a Jupyter kernel "SQL Demo (uv)", and creates the `/tmp/duckdb` spill directory.
 
-**Step 3.** Add the gateway to `~/.ssh/config` (the `create_gateway.sh` output prints the exact block to paste). Then connect VS Code via Remote SSH to `gateway`. Open the `~/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
+**Step 3.** Add the gateway to `~/.ssh/config` (the `create_gateway.sh` output prints the exact block to paste). Then connect VS Code via Remote SSH to `gateway`. Open the `~/525next-steps/demos/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
 
 See the [Infrastructure page](infra.qmd) for architecture diagrams.
 
