@@ -180,8 +180,7 @@ except Exception as e:
 # DuckDB **can** finish the 50M-user query on one machine: enable
 # spill-to-disk, give it more memory, reduce threads. It works,
 # but you're consuming most of the machine and running much slower.
-#
-# **The real question is not "can it run?" but "at what cost?"**
+# The tradeoff is cost and speed, not capability.
 #
 # | Approach | 50M-user GROUP BY | Tradeoff |
 # |----------|-------------------|----------|

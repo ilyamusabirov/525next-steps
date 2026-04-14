@@ -209,22 +209,29 @@ Fewer threads = fewer hash table partitions = less memory duplication. The trade
 
 **Transition:** "DuckDB can be rescued on one machine, but you're fighting the hardware limits. Same SQL, same data: let's see what happens when we distribute the work."
 
-::: {.callout-note collapse="true" title="Honest comparison: when does a cluster actually beat a bigger machine?"}
+::: {.callout-note collapse="true" title="Scale up vs scale out: when does a cluster beat a bigger machine?"}
 
-A t3a.2xlarge (8 vCPU, 32 GB RAM, \$0.30/hr) with DuckDB would handle every query in this demo, including the 50M-user GROUP BY, probably faster than the \$0.71/hr EMR cluster. Our 22.5 GB dataset is well within DuckDB's comfort zone. Industry benchmarks show DuckDB handling 1 TB on a single 64 GB machine.
+DuckDB on a t3a.2xlarge (8 vCPU, 32 GB RAM, \$0.30/hr) would handle every query in this demo. The 50M-user GROUP BY would likely run faster than on the \$0.71/hr EMR cluster. Benchmarks show DuckDB processing 1 TB on a 64 GB machine.
 
-**Where Spark actually wins over a bigger single machine:**
+This is a recent development. Single-machine engines (DuckDB, Polars, DataFusion) barely existed five years ago. Back then, 22.5 GB of GROUP BY work required a cluster. Today it doesn't.
 
-1. **S3 read parallelism beyond one NIC.** DuckDB on one machine gets a fraction of the NIC's bandwidth. Spark on N nodes has N times the network throughput. For scan-heavy queries on hundreds of GB+, this matters.
-2. **Dataset size beyond ~1-10 TB.** DuckDB has been tested up to 1 TB comfortably. Beyond 10 TB, single-node becomes impractical regardless of RAM (disk I/O, query time).
-3. **Fault tolerance for long-running jobs.** If a DuckDB query fails 2 hours in, you start over. Spark's lineage lets another executor pick up from a failed task.
-4. **Concurrent multi-user access.** DuckDB is single-process. Spark can serve multiple users/queries simultaneously via YARN resource management.
-5. **MLlib/Streaming ecosystem.** DuckDB is SQL-only. Spark has MLlib, Structured Streaming, GraphX. If your pipeline chains SQL feature engineering into distributed ML training, Spark avoids a tool boundary.
-6. **Operators that don't spill.** Both DuckDB and Spark spill to disk when memory is full. But DuckDB's `list()` and `string_agg()` aggregates can't spill, and multiple blocking operators in one query can still OOM. Spark's spill is more battle-tested at scale and pools disk across nodes.
+So when does a cluster earn its cost?
 
-**The real question is not "can it run?" but "at what cost and risk?"** For ad-hoc analytics on data up to a few hundred GB, DuckDB on a single large machine is faster, cheaper, and simpler. The cluster earns its keep at TB+ scale, for long-running production pipelines, or when you need concurrency and fault tolerance.
+**Tradeoffs that favor distributed engines (Spark, Trino, Hadoop):**
 
-Sources: [DuckDB Memory Management](https://duckdb.org/2024/07/09/memory-management), [Running DuckDB at 10 TB](https://datamonkeysite.com/2025/10/19/running-duckdb-at-10-tb-scale/), [Should You Ditch Spark?](https://milescole.dev/data-engineering/2024/12/12/Should-You-Ditch-Spark-DuckDB-Polars.html), [Spark Memory: Disk Spill](https://towardsdatascience.com/memory-management-in-apache-spark-disk-spill-59385256b68c/)
+1. **S3 read parallelism.** One machine has one NIC. Three nodes have three times the network throughput. For scan-heavy queries on hundreds of GB+, this is the first bottleneck you hit.
+2. **Dataset size beyond ~1 to 10 TB.** Single-node engines handle 1 TB comfortably. Beyond 10 TB, one machine runs out of disk I/O and patience regardless of RAM. Hadoop MapReduce was built for this scale; Spark improved on it with in-memory caching and DAG execution. Newer engines like [Daft](https://www.getdaft.io/) and [Ray](https://www.ray.io/) target similar scale for ML workloads.
+3. **Fault tolerance.** If a DuckDB query fails 2 hours in, you start over. Spark's lineage lets another executor retry a failed task without restarting the job.
+4. **Elastic fleet management.** EMR Spark can run task instances on Spot pricing and replace them when reclaimed. Scaling a single DuckDB machine up and down is harder to automate.
+5. **Concurrent access.** DuckDB is single-process. Spark serves multiple users and queries through YARN resource management.
+6. **ML and streaming.** DuckDB is SQL-only. Spark has MLlib, Structured Streaming, and GraphX. If your pipeline chains SQL into distributed training, Spark avoids a tool boundary.
+7. **Spill-to-disk gaps.** Both DuckDB and Spark spill intermediates to disk when memory fills up. Both slow down when they do. But DuckDB's `list()` and `string_agg()` can't spill at all, and multiple blocking operators in one query can still OOM. Spark pools disk across nodes and retries failed tasks.
+
+**If you want DuckDB's SQL on a cluster**, Trino does exactly that: distributed SQL execution with a coordinator/worker model, same columnar engine philosophy. AWS Athena runs Trino serverlessly, so the cluster is not even your responsibility. MotherDuck offers hosted DuckDB with similar goals.
+
+For ad-hoc analytics on data up to a few hundred GB, DuckDB on one machine is faster, cheaper, and simpler. The cluster pays for itself at TB+ scale, in production pipelines that need fault tolerance, or when multiple users share the same compute.
+
+Sources: [DuckDB Memory Management](https://duckdb.org/2024/07/09/memory-management), [Running DuckDB at 10 TB](https://datamonkeysite.com/2025/10/19/running-duckdb-at-10-tb-scale/), [Should You Ditch Spark?](https://milescole.dev/data-engineering/2024/12/12/Should-You-Ditch-Spark-DuckDB-Polars.html), [Spark Disk Spill](https://towardsdatascience.com/memory-management-in-apache-spark-disk-spill-59385256b68c/), [Daft vs Ray Data](https://dev.to/yks/daft-vs-ray-data-a-comprehensive-comparison-for-multimodal-data-processing-3686)
 :::
 
 
@@ -360,7 +367,7 @@ SparkSQL completes this query at full parallelism, without consuming all availab
 | Cross-category join | ~19s | ~13s |
 | GROUP BY 50M users | OOM at 4 GB\* | runs |
 
-\*DuckDB **can** finish this query on one machine: enable spill-to-disk, increase memory to 12 GB, reduce to 1 thread. It works, but it consumes most of the machine's 16 GB and runs much slower (single-threaded, disk I/O for the spilled hash table). SparkSQL distributes the hash table across nodes: more total memory, more parallelism.
+\*DuckDB **can** finish this query on one machine: enable spill-to-disk, increase memory to 12 GB, reduce to 1 thread. It works, but consumes most of the machine's 16 GB and runs single-threaded. SparkSQL distributes the hash table across nodes. See the collapsed callout above for a fuller comparison.
 
 Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
 
