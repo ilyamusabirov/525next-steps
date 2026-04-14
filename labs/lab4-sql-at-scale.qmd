@@ -1,0 +1,325 @@
+---
+title: "Lab 4. SQL at Scale: DuckDB vs SparkSQL"
+subtitle: "Find the boundary where single-machine SQL breaks, then cross it"
+---
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+
+**Prerequisites**:
+
+- AWS account with an EC2 instance profile for S3 access ([Instance Profiles](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4c_sql_on_cluster.html#instance-profiles))
+- SSH key pair
+- AWS CLI configured with a profile ([AWS CLI Reference](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w3_aws_cli.html))
+- VS Code with Remote SSH and Python extensions
+
+**Services used**:
+
+| Service | Purpose | Pricing |
+|---|---|---|
+| EC2 t3a.xlarge (16 GB) | DuckDB host | \$0.17/hr |
+| EMR 3-node m6a.xlarge | SparkSQL cluster | \$0.71/hr |
+| S3 reads | Amazon Reviews (22.5 GB) | Free (public data) |
+
+**Estimated cost**: \$2-3 for a 2-hour session (EC2 + EMR). Terminate everything when done.
+
+**Free alternative**: Part 1 (DuckDB) works on any machine with 4+ GB RAM. Download a subset of the data from the [Data Sources](../data.qmd) page and adjust the `S3` path.
+
+**Time**: 60-90 minutes.
+:::
+
+## Advance organizer
+
+**You already know** DuckDB from Lab 2 and SparkSQL from Milestone 3. You ran queries on both, but always on different datasets in different contexts. You never compared them side by side on the same data.
+
+**In this lab** you will run identical SQL queries on DuckDB and SparkSQL against the same 22.5 GB Amazon Reviews dataset. You will watch DuckDB succeed on streaming queries, fail on a high-cardinality aggregation, estimate the memory needed from first principles, and then move to SparkSQL to handle the query DuckDB could not.
+
+::: {.callout-note title="What you're practicing"}
+**Skills**: diagnosing memory bottlenecks in analytical SQL, estimating hash table sizes, choosing between single-machine and distributed engines.
+
+**From the textbook**: [SQL on the Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4c_sql_on_cluster.html) (DuckDB in the cloud, SparkSQL, performance comparison), [Observing Your Spark Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4a_spark_debugging.html) (reading Spark UI, log locations)
+
+**Why practice opportunities matter**: the textbook showed you benchmark numbers. Here you reproduce them yourself, predict outcomes before running, and diagnose failures. The goal is to build intuition for when to reach for a cluster vs when one machine is enough.
+:::
+
+
+## Setup
+
+### Part A: EC2 (DuckDB)
+
+Launch a `t3a.xlarge` instance (4 vCPU, 16 GB RAM) with your EC2 key pair and an instance profile that has S3 read access. Then:
+
+```bash
+ssh -i ~/.ssh/your-key.pem ubuntu@<ec2-ip>
+git clone https://github.com/ilyamusabirov/525next-steps.git
+cd 525next-steps/demos/sql-on-cluster
+bash setup.sh
+```
+
+Connect VS Code via Remote SSH. Open the `demos/sql-on-cluster/` folder, and select the "SQL Demo (uv)" kernel when prompted.
+
+### Part B: EMR (SparkSQL)
+
+Create a 3-node EMR cluster. From your laptop:
+
+```bash
+cd 525next-steps
+bash infra/create_spark_cluster.sh
+```
+
+The script auto-discovers a public subnet, launches the cluster, and prints the cluster ID. Wait for it to reach WAITING state (~8 min).
+
+See the [Infrastructure page](../infra.qmd) for architecture diagrams and SSH config.
+
+
+## Part 1: DuckDB on EC2
+
+Open `demos/sql-on-cluster/01_duckdb_s3.py` in VS Code and run each cell.
+
+### 1a. Streaming queries
+
+Run the setup cell and then the three queries:
+
+1. **Category summary** (GROUP BY category, 4 groups)
+2. **Filter + sort** (ORDER BY ... LIMIT 20)
+3. **Cross-category join** (two DISTINCT sets + hash join)
+
+Record the time for each query.
+
+### Understand
+
+**Before looking at the answers**, write down your prediction for each question.
+
+1. The dataset is 22.5 GB but `memory_limit` is 4 GB. Why does DuckDB not run out of memory?
+2. Query 2 scans 49 million rows with `helpful_vote > 0`, then sorts by `helpful_vote DESC LIMIT 20`. Does DuckDB sort all 49 million rows? How do you know?
+3. Query 3 reads only the Electronics and Books partitions, not all 4 categories. What feature of the data layout makes this possible?
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Think about how a columnar engine reads parquet. Does it load all rows at once?
+2. What data structure would you use to track the top 20 elements in a stream?
+3. Look at the S3 path: `s3://dsci525-data-2026/amazon_reviews/**/*.parquet`. What does the directory structure look like?
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. DuckDB streams data column-by-column from parquet row groups. It reads a batch, updates running aggregates (or filters), then discards the batch. Only the result accumulates in memory, not the input data.
+2. No. DuckDB uses a **top-k heap**: it maintains a heap of size 20, compares each row against the minimum in the heap, and only inserts if the row is larger. This is O(n log k) with constant memory, not O(n log n) full sort.
+3. **Hive partitioning**. The data is stored as `category=Electronics/year=2020/*.parquet`. DuckDB reads the directory structure and skips partitions not mentioned in the WHERE clause.
+:::
+::::
+
+
+## Part 2: hitting the wall
+
+Open `demos/sql-on-cluster/02_duckdb_limits.py`.
+
+### 2a. GROUP BY parent_asin (~10M products)
+
+Run the GROUP BY query. Record the time (~52s expected).
+
+### 2b. Estimate the hash table
+
+**Before running the next cell**, do this calculation:
+
+The GROUP BY builds a hash table with one entry per unique `parent_asin`. Each entry stores:
+
+| Component | Bytes |
+|---|---|
+| Key (parent_asin string, ~10 chars) | ~26 |
+| Hash value | 8 |
+| Aggregation state (COUNT, SUM, COUNT for AVG) | 24 |
+| Pointer and alignment overhead | ~16 |
+| **Total per entry** | **~100** |
+
+There are ~10 million unique products.
+
+**Calculate:** How large is the hash table? Does it fit in 4 GB?
+
+DuckDB uses 4 threads, each with its own hash table partition. **Calculate:** How much memory does each partition need? Total?
+
+:::: {.callout-tip collapse="true"}
+### Check your math
+
+10M entries x 100 bytes = ~1 GB total hash table.
+
+With 4 thread-local partitions: 10M / 4 = 2.5M entries per thread x 100 bytes = 250 MB per thread. Total ~1 GB (plus overhead for partitioning, ~1.5 GB realistic). Fits in 4 GB.
+::::
+
+### 2c. Predict the failure
+
+Now consider GROUP BY `user_id` instead of `parent_asin`. There are ~50 million unique users.
+
+**Calculate:** How large would the hash table be? Does it fit in 4 GB with 4 threads?
+
+Write down your prediction: will this query succeed or OOM?
+
+### 2d. Run it
+
+Run the intentional OOM cell. Was your prediction correct?
+
+### Understand
+
+1. Why does GROUP BY `category` (4 groups) work fine at any memory budget, while GROUP BY `user_id` (50M groups) OOMs? Both scan the same 22.5 GB of data.
+2. The rescue attempt uses `threads = 1` and `memory_limit = '12GB'`. Why would fewer threads help?
+3. What is the rule of thumb for when DuckDB can handle a query? (Hint: it is not about data size.)
+
+:::: {.callout-tip collapse="true"}
+### Answers
+
+1. The bottleneck is the **hash table size**, not the data size. DuckDB streams the data regardless. 4 groups = 400 bytes of hash table (trivial). 50M groups = 5 GB (exceeds the budget).
+2. Each thread builds its own partition of the hash table. With 4 threads, you need 4 copies of the partition mapping. With 1 thread, there is one hash table that can use the full memory budget. The tradeoff: much slower (no parallelism).
+3. DuckDB handles datasets **5-10x larger than `memory_limit`** on hive-partitioned parquet. The limit is **GROUP BY cardinality** (number of unique groups), not data size.
+::::
+
+
+## Part 3: SparkSQL on EMR
+
+SSH to the EMR primary node (see [Infrastructure](../infra.qmd) for SSH config):
+
+```bash
+ssh emr-primary   # uses ProxyJump through gateway
+```
+
+Copy the Spark scripts to the primary node:
+
+```bash
+scp -o ProxyJump=gateway demos/sql-on-cluster/03_spark_sql.py hadoop@<emr-primary-ip>:~/
+```
+
+Or run via `spark-submit`:
+
+```bash
+spark-submit 03_spark_sql.py
+```
+
+### 3a. Same queries, distributed
+
+Run the same queries from Part 1 and 2 on SparkSQL. Record the times.
+
+Fill in your results:
+
+| Query | DuckDB (4 GB / 4 threads) | SparkSQL (3-node) |
+|---|---|---|
+| Category summary | ___s | ___s |
+| Filter + sort (LIMIT 20) | ___s | ___s |
+| GROUP BY 10M products | ___s | ___s |
+| GROUP BY + WINDOW | ___s | ___s |
+| Cross-category join | ___s | ___s |
+| GROUP BY 50M users | OOM | ___s |
+
+### 3b. The query DuckDB couldn't do
+
+The GROUP BY `user_id` runs on SparkSQL. Watch the Spark UI at `http://localhost:4040` (VS Code auto-forwards the port) while it runs.
+
+### Understand
+
+1. SparkSQL is slower than DuckDB on the category summary (~7s vs ~4s). Why?
+2. SparkSQL is faster on GROUP BY 10M products (~32s vs ~52s). Why?
+3. SparkSQL handles the 50M-user GROUP BY that crashed DuckDB. What is different about how it manages the hash table?
+4. Look at the Spark UI Stages tab while Query 3 (GROUP BY 10M) runs. Find the **shuffle read** and **shuffle write** columns. What is being shuffled, and why?
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Think about what happens before any work begins on SparkSQL (job scheduling, task serialization, shuffle coordination).
+2. How many executor cores are reading S3 in parallel? How does SparkSQL distribute the hash table?
+3. Where does the hash table live in DuckDB (one process) vs SparkSQL (multiple executors)?
+4. GROUP BY requires rows with the same key to end up on the same executor. How do they get there?
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. **Cluster overhead.** SparkSQL has startup costs: YARN job scheduling, task serialization, and shuffle coordination. For a trivial 4-group aggregation, this overhead dominates. DuckDB runs in-process with no coordination.
+2. **Parallelism.** 8 executor cores (2 core nodes x 4 vCPU) read S3 and build hash table partitions in parallel, compared to DuckDB's 4 threads on one machine. SparkSQL also has more total memory (~20 GB across executors vs 4 GB).
+3. **Distributed hash table.** SparkSQL partitions the hash table across executors, each in its own JVM heap. With 2 core nodes at 16 GB each, the combined memory is ~20 GB. DuckDB is limited to what one machine has.
+4. **Shuffle** is the redistribution of intermediate data between stages. For GROUP BY, SparkSQL first pre-aggregates locally on each executor (partial aggregation), then shuffles rows by hash(parent_asin) so all rows with the same key end up on the same executor for the final aggregation. This involves serialization, network transfer, and deserialization.
+:::
+::::
+
+
+:::: {.callout-caution collapse="true"}
+## Check yourself: choosing the right engine
+
+```{quizdown}
+---
+shuffleAnswers: true
+---
+
+### You have a 15 GB parquet dataset on S3 and need to compute AVG(price) grouped by 200 product categories. Your EC2 instance has 4 GB RAM. Which engine should you use?
+
+> Think about both the data size and the hash table size.
+
+1. [x] DuckDB. 200 categories means the hash table is ~20 KB, which is trivial. DuckDB streams the 15 GB without loading it all.
+    > The hash table for 200 groups is tiny. DuckDB handles datasets 5-10x larger than memory on hive-partitioned parquet. No cluster needed.
+1. [ ] SparkSQL. 15 GB exceeds 4 GB memory, so you need distributed processing.
+    > DuckDB streams parquet column-by-column. It does not load 15 GB into 4 GB. The data size is not the bottleneck; the hash table size is.
+1. [ ] Neither. You need at least 15 GB of RAM for a 15 GB dataset.
+    > Columnar streaming engines process data in batches. They never need the full dataset in memory.
+
+### Your DuckDB query groups 200 million rows by user_id (80 million unique users) with memory_limit = '4GB' and 4 threads. It OOMs. You change to 1 thread and 12 GB. The query now takes 6 minutes. How would you make it faster?
+
+> Think about what resource DuckDB is missing.
+
+1. [x] Use SparkSQL on a cluster. The hash table (~8 GB) fits across multiple executors, and parallel reads from S3 speed up the scan.
+    > SparkSQL distributes both the hash table and the I/O. With a 3-node cluster you get ~20 GB of combined memory and 8 parallel readers.
+1. [ ] Add temp_directory for spill-to-disk. Spilling always fixes OOM.
+    > Spill helps for operators that can offload incrementally, but an 8 GB hash table that must be random-accessed is slow on disk. Distributing is the better fix.
+1. [ ] Use more threads. More threads always means faster queries.
+    > More threads means more hash table partitions competing for the same memory budget. With 4 threads and 12 GB, each partition gets 3 GB, but 80M/4 = 20M entries per partition at 100 bytes = 2 GB, so it might work. But on this machine, the single-threaded run was already using 12 of 16 GB. Adding threads would OOM again.
+```
+
+::::
+
+## Part 4: clean up
+
+**Terminate everything when done.** EC2 and EMR charge per hour.
+
+```bash
+# Terminate EMR cluster (cluster ID was printed by create_spark_cluster.sh)
+aws emr terminate-clusters --cluster-ids j-XXXXXXXXXXXXX \
+    --profile YOUR_PROFILE --region ca-central-1
+
+# Terminate EC2 instance
+aws ec2 terminate-instances --instance-ids i-XXXXXXXXXXXXX \
+    --profile YOUR_PROFILE --region ca-central-1
+```
+
+Verify both are shutting down:
+
+```bash
+aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
+    --query 'Cluster.Status.State' \
+    --profile YOUR_PROFILE --region ca-central-1
+
+aws ec2 describe-instances --instance-ids i-XXXXXXXXXXXXX \
+    --query 'Reservations[0].Instances[0].State.Name' \
+    --profile YOUR_PROFILE --region ca-central-1
+```
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+**Total cost for this lab** (2-hour session):
+
+| Resource | Time | Cost |
+|---|---|---|
+| EC2 t3a.xlarge | 2 hr | \$0.34 |
+| EMR 3x m6a.xlarge | 1.5 hr | \$1.07 |
+| **Total** | | **~\$1.41** |
+
+If you forgot to terminate: EC2 runs \$4.08/day, EMR runs \$17.04/day.
+:::
+
+## Part 5: Extend
+
+::: {.callout-note title="Connect to other labs"}
+- **Lab 2**: Compare DuckDB on a t3a.micro (1 GB RAM, Lab 2) vs t3a.xlarge (16 GB, this lab). Which queries benefit most from more memory?
+- **Lab 1**: Build a Bruin pipeline that runs one of these DuckDB queries and writes the result to a local table.
+- **Connecting project**: Use SparkSQL to compute product features from the Amazon Reviews dataset, then join with the food quality data from the Connecting Project.
+:::
+
+**Ideas for further practice:**
+
+1. **Tune DuckDB.** Try `memory_limit = '2GB'` with 4 threads. Which queries OOM? Try `threads = 2` with `memory_limit = '2.5GB'`. Can you find the minimum configuration that runs the 10M-product GROUP BY?
+2. **Read the Spark UI.** During the 50M-user GROUP BY, open the Stages tab. Find the shuffle stage. How many bytes were shuffled? How many tasks ran? Was any task significantly slower than the median (data skew)?
+3. **Transient cluster.** Submit the 50M-user query as a batch job using `infra/transient_step.sh`. Check the step logs after it completes. Compare the wall-clock time with the interactive run.
+4. **Estimate before running.** Pick a new query (e.g., GROUP BY `asin` with ~15M unique values). Estimate the hash table size. Predict whether DuckDB will succeed at 4 GB / 4 threads. Run it. Were you right?

@@ -1,0 +1,308 @@
+---
+title: "Lab 2. Run Analytics in the Cloud: DuckDB + EC2"
+subtitle: "Launch a machine, run a pipeline, monitor resources, know the cost"
+---
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+
+**Prerequisites**:
+
+- AWS account (your [course account](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l3c_team_access.html) or [AWS Free Tier](https://aws.amazon.com/free/))
+- SSH key pair ([Team Access guide](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l3c_team_access.html))
+- AWS CLI configured with a profile ([AWS CLI Reference](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w3_aws_cli.html))
+
+**Services used**:
+
+| Service | Purpose | Pricing |
+|---|---|---|
+| EC2 t3a.micro | Run DuckDB + Bruin pipeline | \$0.0094/hr on-demand (free-tier eligible) |
+| EBS gp3 8 GB | Instance root volume | ~\$0.07/month |
+
+**Estimated cost**: \$0.15 for a 1-hour session. Set a \$5 billing alarm before you start (instructions below).
+
+**Free alternative**: every query in this lab also works with local DuckDB. Download the 50K-row sample from the [Data Sources](../data.qmd) page and skip the EC2 parts.
+
+**Time**: 45-60 minutes.
+:::
+
+## Advance organizer
+
+**You already know** how to SSH into an EC2 instance and run commands on it. You used EC2 for milestone work with step-by-step instructions. You also know DuckDB from Week 1 and Bruin from Lab 1.
+
+**In this lab** you will go through the full cloud loop independently: launch an instance, install tools, run a Bruin pipeline against remote data, monitor resources with `htop`, compare query performance at different data sizes, and tear everything down knowing exactly what it cost.
+
+
+::: {.callout-note title="What you're practicing"}
+**Skills**: SSH into a cloud machine, run a data pipeline remotely, query S3-compatible storage, monitor CPU and memory, estimate and control costs.
+
+**From the textbook**: [EC2 and S3](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l3b_cloud_machine.html), [Moving Data](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l3d_data_movement.html), [Data Pipelines](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_pipelines.html)
+
+**Why practice opportunities matter**: in the course you used EC2 for milestone work with guided instructions. Here you go through the full cloud loop independently: launch, install, run, observe, tear down. The goal is to make "spin up a machine and run something" feel routine, not scary.
+:::
+
+## Setup
+
+### Set a billing alarm first
+
+Before launching any instance:
+
+```bash
+aws cloudwatch put-metric-alarm \
+    --alarm-name "spending-alarm-5usd" \
+    --metric-name EstimatedCharges \
+    --namespace AWS/Billing \
+    --statistic Maximum \
+    --period 21600 \
+    --threshold 5 \
+    --comparison-operator GreaterThanThreshold \
+    --evaluation-periods 1 \
+    --dimensions Name=Currency,Value=USD \
+    --alarm-actions arn:aws:sns:us-east-1:$(aws sts get-caller-identity --query Account --output text):billing-alerts \
+    --region us-east-1 \
+    --profile YOUR_PROFILE
+```
+
+### Launch a t3a.micro instance
+
+```bash
+aws ec2 run-instances \
+    --image-id ami-0a2e7efb4257c0907 \
+    --instance-type t3a.micro \
+    --key-name YOUR_KEY \
+    --security-group-ids YOUR_SG \
+    --region ca-central-1 \
+    --profile YOUR_PROFILE \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=lab2-duckdb}]' \
+    --query 'Instances[0].InstanceId' --output text
+```
+
+SSH in and install DuckDB + Bruin:
+
+```bash
+ssh -i YOUR_KEY.pem ubuntu@INSTANCE_IP
+
+# On the instance:
+curl -LsSf https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip -o duckdb.zip
+unzip duckdb.zip && chmod +x duckdb
+
+curl -LsSf https://getbruin.com/install/cli | sh
+```
+
+## Part 1: Run a Bruin pipeline on EC2
+
+Clone the repo and run the food analytics pipeline:
+
+```bash
+git clone https://github.com/ilyamusabirov/525next-steps.git
+cd 525next-steps/lab-2-ec2
+bruin run --config-file .bruin.yml pipeline.yml
+```
+
+The DAG: `food_products` -> `grade_summary` -> `export_grade_summary`
+
+Check the results:
+
+```bash
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM grade_summary"
+```
+
+::: {.callout-note title="S3-compatible storage"}
+This data lives on DigitalOcean Spaces, not AWS S3. DuckDB reads it over HTTPS just like any other URL. The S3 protocol is a standard: same tools, different provider, no AWS credentials needed. See the [Data Sources](../data.qmd) page for details.
+:::
+
+### Understand
+
+1. Open `assets/load_food.sql`. What quality checks run after the data loads?
+2. The data was fetched over the network from DigitalOcean. Where did DuckDB process it: on the remote server or on your EC2 instance?
+3. What would change if the dataset were 5 GB instead of 5 MB?
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Look at the `columns:` block in the @bruin header of load_food.sql.
+2. Where is DuckDB running? Where is the data stored?
+3. Compare the dataset size to t3a.micro's specs (2 vCPU, 1 GB RAM).
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. `not_null` on product_name_en and `accepted_values` (a through e) on nutriscore_grade.
+2. On your EC2 instance. DuckDB downloaded the parquet over HTTPS, then processed it in local memory. The remote server just served the file.
+3. 5 GB exceeds 1 GB RAM. DuckDB would spill intermediate results to disk (slower but still works). For faster processing, use a larger instance or filter to fewer columns/rows.
+:::
+::::
+
+## Part 2: Interactive exploration
+
+Now query the data interactively:
+
+```sql
+./duckdb food_analytics.db
+
+-- The pipeline already loaded the data. Query the local table:
+SELECT * FROM grade_summary;
+
+-- Or query the remote parquet directly:
+.timer on
+SELECT nutriscore_grade, COUNT(*) AS n, ROUND(AVG(energy_kcal_100g), 1) AS avg_kcal
+FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_sample_50k.parquet')
+GROUP BY nutriscore_grade
+ORDER BY nutriscore_grade;
+```
+
+Compare the two: querying the local DuckDB table (populated by the pipeline) vs reading remote parquet. Which is faster? Why?
+
+:::: {.callout-tip collapse="true"}
+### Hint
+
+One reads from a file on disk. The other fetches data over the network. What is the bottleneck?
+
+::: {.callout-note collapse="true"}
+### Answer
+
+The local table query is faster. The data is already on the instance's EBS volume, accessed via memory-mapped file. The remote query downloads the parquet over HTTPS first, adding network latency and transfer time.
+:::
+::::
+
+## Part 3: Scale and compare
+
+::: {.callout-note title="What you're practicing"}
+**Skill**: predicting how data size and query shape affect performance and cost.
+
+**From the textbook**: [File Formats & Parquet](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l2a_file_formats.html), [Resource Considerations](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_theory.html)
+
+**Why practice opportunities matter**: the course explained column pruning and row-group filtering in lecture. Here you measure the difference yourself on real data, on a real machine, and connect that measurement to a dollar cost. Empirical intuition beats memorized theory.
+:::
+
+### 3a. 50K rows vs 4.4M rows
+
+```sql
+-- Small sample (50K rows)
+.timer on
+SELECT nutriscore_grade, COUNT(*) AS n, ROUND(AVG(sugars_100g), 2) AS avg_sugar
+FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_sample_50k.parquet')
+GROUP BY nutriscore_grade ORDER BY nutriscore_grade;
+
+-- Full dataset (4.4M rows)
+SELECT nutriscore_grade, COUNT(*) AS n, ROUND(AVG(sugars_100g), 2) AS avg_sugar
+FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_sample.parquet')
+GROUP BY nutriscore_grade ORDER BY nutriscore_grade;
+```
+
+**Predict first**: the full dataset is ~90x larger. Will the query take 90x longer?
+
+::: {.callout-tip collapse="true" title="What happened"}
+Parquet stores data in columnar row groups. DuckDB reads only the `nutriscore_grade` and `sugars_100g` columns, skipping the other 20. The query is slower, but not 90x slower, because column pruning reduces the actual bytes transferred.
+:::
+
+### 3b. Column pruning
+
+```sql
+-- Read all 22 columns
+.timer on
+SELECT * FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_sample.parquet') LIMIT 100000;
+
+-- Read only 2 columns
+SELECT nutriscore_grade, sugars_100g
+FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_sample.parquet') LIMIT 100000;
+```
+
+Compare the times. This is the practical benefit of columnar storage.
+
+### 3c. Monitor resources
+
+In a second SSH session:
+
+```bash
+htop
+```
+
+Run the full-dataset query again in your DuckDB session. Watch:
+
+- CPU usage (should spike to ~100% on 2 vCPUs)
+- Memory usage (how much of the 1 GB does DuckDB use?)
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+**t3a.micro**: 2 vCPU, 1 GB RAM, \$0.0094/hr (ca-central-1).
+
+| Scenario | Compute cost | Notes |
+|---|---|---|
+| This lab session (1 hour) | ~\$0.01 | Terminate when done |
+| Daily 1-hour job for a year | ~\$34 | On-demand |
+| Daily 1-hour job, reserved | ~\$22 | 1-year commitment, 35% savings |
+| Weekly, stopped between sessions | ~\$0.50/month | Stopped = \$0 compute, ~\$0.07 EBS |
+:::
+
+:::: {.callout-caution collapse="true"}
+## ☑️ Check yourself: cloud execution
+
+```{quizdown}
+---
+shuffleAnswers: true
+---
+
+### Your 50K-row query took 0.3 seconds. The same query on 4.4M rows took 2 seconds (88x more data). Why wasn't it 88x slower?
+
+> The query uses only 2 of 22 columns. Think about how parquet stores data.
+
+1. [x] Column pruning: DuckDB reads only the columns in the query, skipping the other 20. Fewer bytes transferred means sublinear scaling.
+  > Parquet stores each column separately. A 2-column query reads ~9% of the file, not 100%.
+1. [ ] DuckDB caches the parquet metadata after the first query and reuses it
+  > Metadata caching helps slightly, but the main speedup comes from reading fewer columns.
+1. [ ] The larger file has better compression ratios
+  > Compression helps both files equally. The speedup comes from column pruning, not compression.
+1. [ ] Network bandwidth saturates at the same rate for both files
+  > Bandwidth matters, but the key factor is that DuckDB requests only 2 columns from the parquet file.
+
+### You terminate the EC2 instance. Which of these still exist afterward?
+
+> Default EBS root volumes are deleted on termination. Object storage is independent of EC2.
+
+- The parquet file on DigitalOcean Spaces :: Survives termination
+  > Object storage is independent of any EC2 instance. The data lives on a different provider entirely.
+- The DuckDB database on the instance's root volume :: Lost on termination
+  > The default EBS root volume is deleted when you terminate. Everything on it (database, installed tools, query results) is gone.
+- The Bruin CLI binary you installed on the instance :: Lost on termination
+  > Bruin was installed on the instance's filesystem, which lives on the root EBS volume.
+- The grade_summary you exported to a parquet file on the instance :: Lost on termination
+  > "Local" on EC2 means the instance's EBS volume. Terminate deletes the volume and everything on it.
+- :: Recoverable from snapshot
+  > EBS snapshots preserve volume state, but only if you created one before terminating. This lab did not create a snapshot.
+```
+
+::::
+
+## Part 4: Clean up
+
+**Terminate the instance when you're done:**
+
+```bash
+aws ec2 terminate-instances \
+    --instance-ids YOUR_INSTANCE_ID \
+    --region ca-central-1 \
+    --profile YOUR_PROFILE
+```
+
+Verify it's terminated:
+
+```bash
+aws ec2 describe-instances \
+    --instance-ids YOUR_INSTANCE_ID \
+    --query 'Reservations[0].Instances[0].State.Name' \
+    --region ca-central-1 \
+    --profile YOUR_PROFILE
+```
+
+## Part 5: Extend
+
+::: {.callout-note title="Connect to other labs"}
+- **Lab 1**: Compare running the same pipeline locally vs on EC2. Same pipeline definition, different machine. Time both.
+- **Lab 3**: After embedding product names in Lab 3, upload the DuckDB database to EC2 and query embeddings with `array_cosine_similarity` remotely.
+- **Connecting project**: Run the full food report pipeline on EC2 with the 4.4M-row dataset instead of the 50K sample.
+:::
+
+**Ideas for further practice:**
+
+1. Try a larger instance (t3a.small, 2 GB RAM). Does the full-dataset query get faster? By how much? Was the extra cost worth it?
+2. Set DuckDB's `memory_limit = '512MB'` and `temp_directory = '/tmp/duckdb_swap'`. Re-run the full query. What changes?
+3. Query the [Amazon Reviews dataset](../data.qmd) from AWS S3 (`s3://dsci525-data-2026/`). Compare latency reading from S3 vs DigitalOcean Spaces.

@@ -1,0 +1,3 @@
+name: food_analytics
+default_connections:
+  duckdb: "duckdb-default"

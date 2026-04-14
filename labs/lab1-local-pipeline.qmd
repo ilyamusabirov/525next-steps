@@ -1,0 +1,302 @@
+---
+title: "Lab 1. Build a Local Data Pipeline: DuckDB + Bruin"
+subtitle: "From loose scripts to a validated DAG, without leaving your laptop"
+---
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+**Cost**: \$0. This entire lab runs on your laptop.
+
+**Prerequisites**:
+
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- [Bruin CLI](https://getbruin.com) (`curl -LsSf https://getbruin.com/install/cli | sh`)
+
+**Time**: 30-45 minutes.
+:::
+
+## Advance organizer
+
+**You already know** how to write SQL queries and run Python scripts. In the course milestones you ran steps by hand in a specific order, and if one failed, you started over.
+
+**In this lab** you will define those steps as a Bruin pipeline: each step is a file (an "asset"), dependencies are declared in headers, and the tool handles ordering and validation. You will run the pipeline, break it on purpose, and extend it with your own asset.
+
+
+::: {.callout-note title="What you're practicing"}
+**Skills**: defining data pipelines as code: DAGs, assets, dependencies, quality checks.
+
+**From the textbook**: [Data Pipelines](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_pipelines.html) (pipeline concepts, quality checks, materialization)
+
+**Why practice opportunities matter**: in the course you saw one pipeline example. Here you build your own, break it on purpose to see how quality checks protect downstream assets, then extend it. The goal is to make "write a pipeline, not a script" feel like a natural reflex. The implementation uses Bruin, but the concepts (DAGs, assets, quality gates) transfer to Airflow, dbt, Dagster, and any other pipeline tool.
+:::
+
+## What you'll build
+
+A 3-asset Bruin pipeline that reads a batch of Open Food Facts products over HTTPS, computes nutrition summaries by nutriscore grade, validates the output with quality checks, and exports to Parquet. You will run the pipeline on 2 data batches to see how results and quality checks change when new data arrives. Everything runs locally on DuckDB.
+
+## Setup
+
+```bash
+# Install Bruin (if you haven't already)
+curl -LsSf https://getbruin.com/install/cli | sh
+
+# Navigate to the lab directory
+cd lab-1-bruin
+```
+
+The `lab-1-bruin/` directory is already a Bruin project with a working pipeline.
+
+## Part 1: Run the starter pipeline
+
+```bash
+bruin run --config-file .bruin.yml pipeline.yml
+```
+
+You should see Bruin resolve the DAG and run 3 assets in order:
+
+```
+raw_products  ->  grade_summary  ->  export_summary
+```
+
+After it completes, check the output:
+
+```bash
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM grade_summary"
+```
+
+### Understand
+
+Before moving on, answer these questions (check your answers by querying the database):
+
+1. How many nutriscore grades are in the output? Which grade has the most products?
+2. Which grade has the highest average sugar content? Does that match your expectation?
+3. What would happen if you deleted `grade_summary.sql` and re-ran the pipeline?
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Query the grade_summary table and sort by n_products.
+2. Look at the sugar column. Do worse grades mean more sugar?
+3. Check which assets list `grade_summary` in their `depends:` block.
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. 5 grades (a through e). Run: `SELECT nutriscore_grade, n_products FROM grade_summary ORDER BY n_products DESC`.
+2. Grade 'd' or 'e' has the highest average sugar. Worse nutriscore grades correlate with higher sugar content.
+3. `export_summary` depends on `grade_summary`, so it fails too. `raw_products` has no such dependency and still runs.
+:::
+::::
+
+## Part 2: Explore the assets
+
+Open each file in `lab-1-bruin/assets/` and read the `@bruin` header block. Notice:
+
+- **`raw_products.sql`**: `type: duckdb.sql`, `materialization: table`. Reads parquet from a public URL over HTTPS and creates a DuckDB table. The `columns` block validates that every row has a valid nutriscore grade (`accepted_values: a-e`).
+- **`grade_summary.sql`**: `depends: raw_products`. Bruin uses this to order execution. Quality checks enforce `unique` on grade (one row per grade) and `positive` on product count.
+- **`export_summary.sql`**: `depends: grade_summary`. Writes the summary to a Parquet file.
+
+::: {.callout-note title="What you're practicing"}
+**Skill**: reading and interpreting pipeline definitions (asset headers, dependencies, quality checks).
+
+**From the textbook**: [Quality checks](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_pipelines.html#quality-checks)
+
+**Why this matters**: in practice, most of your time is spent reading and modifying existing pipelines, not writing them from scratch. Being fluent at scanning an asset header and understanding its dependencies, materialization, and checks saves real time.
+:::
+
+Run only the quality checks without re-executing assets:
+
+```bash
+bruin run --config-file .bruin.yml --only checks assets/grade_summary.sql
+```
+
+## Part 3: Scale and compare
+
+Each exercise asks you to predict what will happen, then verify. This builds intuition for pipeline behavior you will rely on in larger projects.
+
+### 3a. Table vs view
+
+Edit `grade_summary.sql` and change `materialization: table` to `materialization: view`.
+
+```bash
+bruin run --config-file .bruin.yml pipeline.yml
+```
+
+**Predict first**: will the pipeline be faster or slower? Why?
+
+::: {.callout-tip collapse="true" title="What happened"}
+A view stores the query definition, not the data. The pipeline runs faster because it skips writing results to disk. But downstream queries against `grade_summary` re-execute the aggregation every time. For small data this is fine; for large data, tables are better.
+:::
+
+Change it back to `table` before continuing.
+
+### 3b. Add a quality check that fails
+
+Edit `grade_summary.sql` and add a check that will fail. For example, add this inside the `columns` block for `n_products`:
+
+```yaml
+  - name: n_products
+    type: integer
+    checks:
+      - name: positive
+      - name: accepted_values
+        value:
+          - 1
+          - 2
+```
+
+Re-run the pipeline. What happens to `export_summary`?
+
+::: {.callout-tip collapse="true" title="What happened"}
+The quality check on `grade_summary` fails (each grade has thousands of products, not 1 or 2), so Bruin stops the pipeline. `export_summary` never runs. This is the point of quality checks: they catch problems before bad data flows downstream.
+:::
+
+Remove the failing check before continuing.
+
+### 3c. Add your own asset
+
+Create `lab-1-bruin/assets/high_sugar.sql`:
+
+```sql
+/* @bruin
+
+name: high_sugar_products
+type: duckdb.sql
+
+materialization:
+    type: table
+
+depends:
+  - raw_products
+
+columns:
+  - name: product_name_en
+    type: varchar
+    checks:
+      - name: not_null
+
+@bruin */
+
+-- TODO: find products with grade 'a' (healthiest) but sugars_100g > 15
+-- These are "suspicious" products where the grade might not match expectations
+-- Hint: SELECT ... FROM raw_products WHERE ...
+```
+
+Fill in the SQL, run the pipeline, and verify your results. Notice how the new asset fits into the DAG alongside `grade_summary`.
+
+::::: {.callout-tip collapse="true"}
+### Hint: what to filter on
+
+You need 2 conditions in your WHERE clause: one for the grade column, one for the sugar threshold.
+
+:::: {.callout-warning collapse="true"}
+### Hint: the approach
+
+`WHERE nutriscore_grade = 'a' AND sugars_100g > 15` selects products with the best grade but surprisingly high sugar. Include `product_name_en` so you can see what these products are.
+
+::: {.callout-note collapse="true"}
+### Solution
+
+```sql
+SELECT code, product_name_en, nutriscore_grade, sugars_100g
+FROM raw_products
+WHERE nutriscore_grade = 'a'
+  AND sugars_100g > 15
+ORDER BY sugars_100g DESC
+```
+:::
+::::
+:::::
+
+### 3d. Re-run with new data
+
+Your pipeline ran on batch 1 (20K products, clean data). In production, new data arrives regularly. A second batch is available with 30K additional products.
+
+Edit `raw_products.sql` and change the URL from `food_batch_1.parquet` to `food_batch_2.parquet`:
+
+```sql
+SELECT *
+FROM read_parquet('https://mds26.tor1.digitaloceanspaces.com/data/525next-steps/food_batch_2.parquet')
+WHERE nutriscore_grade IN ('a', 'b', 'c', 'd', 'e')
+  AND product_name_en IS NOT NULL
+  AND LENGTH(product_name_en) > 2
+```
+
+Re-run the pipeline:
+
+```bash
+bruin run --config-file .bruin.yml pipeline.yml
+```
+
+**Before you look at results, predict:**
+
+1. Will `grade_summary` numbers change? In which direction?
+2. If you built `high_sugar_products` in 3c, will it find more or fewer products?
+
+**Then check:**
+
+```bash
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM grade_summary"
+```
+
+::: {.callout-tip collapse="true" title="What happened"}
+Batch 2 has 6,000 products per grade (vs 4,000 in batch 1). The product counts in `grade_summary` changed. Average sugar and energy values shifted because batch 2 includes edge cases that batch 1 excluded: grade-a products with high sugar (>15g) and grade-e products with low energy (<100 kcal).
+
+If you built `high_sugar_products`, it now finds results: batch 2 contains 70 grade-a products with sugars above 15g. Batch 1 had none.
+
+This is why pipelines re-run: the same pipeline definition produces different results when the input data changes. Quality checks protect you by catching problems early, but they only catch what you define. The grade-a-high-sugar products pass all current checks (valid grade, non-null code) because "grade a with high sugar" is not something the checks test for.
+:::
+
+:::: {.callout-caution collapse="true"}
+## ☑️ Check yourself: pipeline concepts
+
+```{quizdown}
+---
+shuffleAnswers: true
+---
+
+### Match each observation from the lab to the pipeline concept it demonstrates.
+
+> Pipeline assets declare dependencies, materialization type, and quality checks in their @bruin header.
+
+- raw_products runs before grade_summary every time :: depends
+  > The `depends: raw_products` field tells Bruin to run raw_products first and wait for it to finish.
+- Changing grade_summary from table to view made the pipeline faster to create :: materialization
+  > A view stores the query, not the result. Faster to create, but downstream queries re-execute the aggregation each time.
+- The pipeline stopped after n_products failed accepted_values, and export_summary never ran :: quality check
+  > Quality checks gate downstream execution. A failing check blocks everything that depends on the failed asset.
+- high_sugar and grade_summary ran in parallel because neither depends on the other :: depends
+  > Both depend on raw_products but not on each other. Bruin runs independent DAG branches concurrently.
+- :: pipeline schedule
+  > A schedule controls when a pipeline runs automatically. This lab ran the pipeline manually with `bruin run`.
+- :: connection string
+  > A connection string (in .bruin.yml) tells Bruin where to execute. It does not control ordering, storage, or validation.
+
+### You add a check requiring n_products to be 1 or 2. Every grade actually has thousands. What happens to export_summary?
+
+> Think about when quality checks run relative to materialization.
+
+1. [ ] The pipeline completes normally: quality checks produce warnings but do not block execution
+  > Bruin quality checks are hard gates, not warnings. A failure stops the pipeline.
+1. [x] grade_summary materializes, its check fails, and export_summary is skipped
+  > Bruin materializes the asset first, then runs quality checks. The check fails, blocking all downstream assets.
+1. [ ] grade_summary is rolled back to its previous state
+  > Bruin does not roll back materialized assets. The table keeps its new data, but the pipeline stops.
+1. [ ] raw_products fails because the check is evaluated before any asset runs
+  > Quality checks run after their own asset materializes, not before or on upstream assets.
+```
+
+::::
+
+## Part 4: Extend
+
+::: {.callout-note title="Connect to other labs"}
+- **Lab 2**: Run this same pipeline on EC2, but switch the data URL to the full 4.4M-row dataset. Compare local vs cloud execution time.
+- **Lab 3**: Add an asset that calls the GitHub Models API to generate text descriptions of nutrition patterns per grade.
+- **Connecting project**: The food report project extends this pipeline with Pydantic validation and embeddings.
+:::
+
+**Ideas for further practice:**
+
+1. **Rainfall pipeline**: swap the food data URL for the [rainfall CSV](../data.qmd) (`ml_data_SYD.csv`). Build a `model_summary` asset that groups by climate model instead of nutriscore grade. Same Bruin structure, different domain.
+2. Add a Python asset (`.py` file with `@bruin` header) that reads `grade_summary` and creates a matplotlib bar chart.
+3. Add a `schedule` to `pipeline.yml` and a GitHub Actions workflow to run it daily (see the [Bruin pipelines chapter](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_pipelines.html) for a template).

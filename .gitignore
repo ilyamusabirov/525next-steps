@@ -1,0 +1,44 @@
+# Quarto
+_site/
+.quarto/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# DuckDB
+*.db
+*.db.wal
+
+# Data (downloaded, not committed)
+*.parquet
+*.csv
+
+# OS
+.DS_Store
+
+# Bruin
+weather.db
+
+# Model artifacts
+*.joblib
+*.pkl
+
+# IDE
+.vscode/
+.idea/
+
+/.quarto/
+**/*.quarto_ipynb
+
+# Local Netlify folder
+.netlify
+
+# Root .bruin.yml only (lab-specific configs must be committed)
+/.bruin.yml
+logs/runs
+logs/*.log
+*.py[cod]
+logs/queries
+.env

@@ -1,0 +1,60 @@
+---
+title: "Post-DSCI 525 Self-study Labs"
+subtitle: "Self-paced micro-labs to build cloud and pipeline fluency"
+---
+
+You finished DSCI 525. You built an ML pipeline end-to-end: data acquisition, cloud infrastructure, distributed compute, deployed API. But 4 weeks is a sprint, and sprints leave gaps.
+
+These labs give you **practice opportunities**. Each one is a focused, 30-60 minute exercise that reinforces one cluster of skills from the course. Clone, run, see results, then extend.
+
+## How to use this repo
+
+```bash
+# Install uv (if you don't have it yet)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+git clone https://github.com/ilyamusabirov/525next-steps.git
+cd 525next-steps
+uv sync
+```
+
+If you prefer conda/pip:
+
+```bash
+git clone https://github.com/ilyamusabirov/525next-steps.git
+cd 525next-steps
+pip install .
+```
+
+This reads `pyproject.toml` and installs the same dependencies into your current environment.
+
+Then pick a lab. Each has:
+
+1. **Starter code that works immediately**: clone and run, see output in under 5 minutes
+2. **Understand prompts**: "what just happened?" questions to check your mental model
+3. **Scale/compare steps**: change a parameter, predict the effect, measure, explain
+4. **Extend pointers**: ideas that connect to other labs or capstone-scale problems
+
+## The labs
+
+| Lab | What you practice | Cost | Time |
+|---|---|---|---|
+| [1. Build a Local Data Pipeline](labs/lab1-local-pipeline.qmd) | Pipeline structure, SQL transforms, quality checks, materialization | Free | 30-45 min |
+| [2. Run Analytics in the Cloud](labs/lab2-cloud-analytics.qmd) | SSH, S3-compatible reads, resource monitoring, cost tracking | ~\$0.50 | 45-60 min |
+| [3. Text Search with Embeddings](labs/lab3-llm-embeddings.qmd) | Embedding API, vector storage, similarity search in SQL | Free | 45-60 min |
+| [4. SQL at Scale](labs/lab4-sql-at-scale.qmd) | DuckDB vs SparkSQL boundary, hash table sizing, Spark UI | ~\$1.50 | 60-90 min |
+| [Connecting project](project/index.qmd) | Chains all 3: pipeline + validation + embeddings + ML + report | Free locally | 2-3 hours |
+
+## Live demo & infrastructure
+
+The `demos/sql-on-cluster/` directory contains the scripts from the Week 4 live demo: DuckDB on EC2, SparkSQL on EMR, and the boundary where single-machine SQL breaks. Lab 4 guides you through the same scripts with predict-then-run exercises.
+
+See the [Infrastructure page](infra.qmd) for architecture diagrams, SSH access patterns, and reproduction instructions.
+
+## Before you start
+
+::: {.callout-warning icon="false" title="Cost awareness"}
+Every lab that touches cloud resources has a **Cloud Economy** box at the top showing expected cost and free alternatives. Set up a billing alarm before your first cloud lab. We show you how.
+:::
+
+**Prerequisites**: Python 3.11+, [uv](https://docs.astral.sh/uv/), and [Bruin CLI](https://getbruin.com/install/cli). Labs 2+ need an AWS account (your course account works, or use [AWS Free Tier](https://aws.amazon.com/free/)).

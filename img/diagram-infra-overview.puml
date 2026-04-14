@@ -1,0 +1,72 @@
+@startuml diagram-infra-overview
+left to right direction
+title Infrastructure Overview
+
+!define AWSPuml https://raw.githubusercontent.com/awslabs/aws-icons-for-plantuml/v23.0/dist
+!include AWSPuml/AWSCommon.puml
+!include AWSPuml/Compute/EC2.puml
+!include AWSPuml/Storage/SimpleStorageServiceS3Standard.puml
+!include AWSPuml/Analytics/EMR.puml
+!include AWSPuml/Groups/AWSCloud.puml
+
+skinparam defaultFontSize 14
+skinparam rectangle {
+  BackgroundColor #f8f9fa
+  BorderColor #6c757d
+}
+skinparam node {
+  BackgroundColor #f8f9fa
+  BorderColor #6c757d
+}
+skinparam database {
+  BackgroundColor #f8f9fa
+  BorderColor #6c757d
+}
+skinparam note {
+  BackgroundColor #fff9c4
+  BorderColor #f0c040
+}
+skinparam ArrowColor #333
+skinparam ArrowFontSize 12
+
+' ── Local ─────────────────────────────────────────────────────────────
+rectangle "Local Machine" as Local {
+  rectangle "VS Code\n//Remote SSH//" as VSCode #dcedc8
+}
+
+' ── AWS Cloud ─────────────────────────────────────────────────────────
+AWSCloudGroup(AWS, "AWS Cloud  (ca-central-1)") {
+
+  node "<$EC2>\nGateway EC2\nt3a.xlarge · 16 GiB\n//DuckDB + SSH jump host//\n\$0.17/hr" as Gateway #dcedc8
+
+  rectangle "<$EMR>\nEMR Cluster · \$0.71/hr" as EMR {
+    node "Primary\nm6a.xlarge\n//YARN RM + driver//" as Primary #c8e6c9
+    node "Core 1\nm6a.xlarge\n//executor + HDFS//" as Core1 #e3f2fd
+    node "Core 2\nm6a.xlarge\n//executor + HDFS//" as Core2 #e3f2fd
+  }
+
+  database "<$SimpleStorageServiceS3Standard>\nS3\ndsci525-data-2026\n//22.5 GB Amazon Reviews//" as S3 #bbdefb
+}
+
+' ── Connections ───────────────────────────────────────────────────────
+VSCode --> Gateway : SSH\n//port 22//
+Gateway --> Primary : ProxyJump\n//within VPC//
+Primary --> Core1 : Spark\ntasks
+Primary --> Core2 : Spark\ntasks
+Gateway --> S3 : DuckDB reads\n//credential_chain//
+EMR --> S3 : spark.read.parquet\n//IAM instance profile//
+
+' ── Notes ─────────────────────────────────────────────────────────────
+note bottom of Gateway
+  **Part 1**: DuckDB
+  Single-machine SQL
+  on 22.5 GB parquet
+end note
+
+note bottom of EMR
+  **Part 2**: SparkSQL
+  Distributed SQL
+  (queries DuckDB can't)
+end note
+
+@enduml

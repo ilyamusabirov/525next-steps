@@ -1,0 +1,72 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Post-DSCI 525 Self-study Labs"
+  repo-url: https://github.com/ilyamusabirov/525next-steps
+  repo-actions: [issue]
+
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - text: "Labs"
+        menu:
+          - href: labs/lab1-local-pipeline.qmd
+            text: "1. Build a Local Data Pipeline"
+          - href: labs/lab2-cloud-analytics.qmd
+            text: "2. Run Analytics in the Cloud"
+          - href: labs/lab3-llm-embeddings.qmd
+            text: "3. Text Search with Embeddings"
+          - href: labs/lab4-sql-at-scale.qmd
+            text: "4. SQL at Scale: DuckDB vs SparkSQL"
+      - href: project/index.qmd
+        text: "Connecting Project"
+      - href: data.qmd
+        text: "Data Sources"
+      - href: demo-guide.qmd
+        text: "Live Demo Guide"
+      - href: infra.qmd
+        text: "Infrastructure"
+
+  sidebar:
+    style: docked
+    search: true
+    contents:
+      - section: "Get Started"
+        contents:
+          - href: index.qmd
+            text: "Overview"
+          - href: data.qmd
+            text: "Data Sources"
+      - section: "Labs"
+        contents:
+          - href: labs/lab1-local-pipeline.qmd
+            text: "1. Build a Local Data Pipeline"
+          - href: labs/lab2-cloud-analytics.qmd
+            text: "2. Run Analytics in the Cloud"
+          - href: labs/lab3-llm-embeddings.qmd
+            text: "3. Text Search with Embeddings"
+          - href: labs/lab4-sql-at-scale.qmd
+            text: "4. SQL at Scale"
+      - section: "Connecting Project"
+        contents:
+          - href: project/index.qmd
+            text: "Food Product Quality Report"
+      - section: "Live Demo"
+        contents:
+          - href: demo-guide.qmd
+            text: "Demo Flow & Talking Points"
+      - section: "Infrastructure"
+        contents:
+          - href: infra.qmd
+            text: "Setup & Reproduction Guide"
+
+execute:
+  eval: false
+
+format:
+  html:
+    theme: Yeti
+    toc: true

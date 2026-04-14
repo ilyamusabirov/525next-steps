@@ -1,0 +1,321 @@
+---
+title: "Lab 3. Text Search with Embeddings: GitHub Models + DuckDB"
+subtitle: "Turn product names into vectors, store them in a database, search with SQL"
+---
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+**Cost**: \$0. GitHub Models provides free access to embedding models.
+
+**Prerequisites**:
+
+- GitHub account with a [personal access token](https://github.com/settings/tokens) (classic, no special scopes needed)
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+
+**Services used**:
+
+| Service | Purpose | Free-tier limits |
+|---|---|---|
+| GitHub Models (text-embedding-3-small) | Generate vector embeddings | 15 req/min, 150 req/day, 64K tokens/req |
+| DuckDB (local) | Store and query vectors | No limits, runs in-process |
+
+GitHub Models groups models into [rate limit tiers](https://docs.github.com/en/github-models/prototyping-with-ai-models): **low** (chat models like gpt-4o-mini: 15 req/min, 150/day), **high** (gpt-4o, Llama-405B: 10 req/min, 50/day), **embeddings** (15 req/min, 150/day, 64K tokens/req), and **custom** (reasoning models: 1-2 req/min). All tiers enforce per-request token limits: 8K in / 4K out for chat, 64K for embeddings. At 50 product names per batch, 1,000 products takes ~20 requests and finishes in about 2 minutes.
+
+**Time**: 45-60 minutes.
+:::
+
+## Advance organizer
+
+**You already know** how to call REST APIs (you used them in Week 1 to fetch weather data) and how to query structured data in DuckDB. Embeddings are the bridge between unstructured text and structured analysis.
+
+**In this lab** you will call an embedding API to convert food product names into numeric vectors, store those vectors in DuckDB, and run similarity searches with pure SQL. The API pattern (OpenAI SDK with a swapped `base_url`) is the same pattern used for OpenAI, Azure OpenAI, Groq, and dozens of other providers.
+
+
+::: {.callout-note title="What you're practicing"}
+**Skills**: calling an embedding API, batching requests with rate-limit awareness, storing and querying vector embeddings in SQL.
+
+**From the textbook**: [REST APIs](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l1a_rest_api.html) (API calling patterns), [DuckDB, Strategies & Alternatives](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/l2e_duckdb_strategies_alternatives.html) (analytical SQL)
+
+**Why practice opportunities matter**: embeddings are how modern ML systems handle text. Learning this pattern once with a free API means you can switch providers later by changing one line (the `base_url`). And storing vectors in DuckDB shows that your existing SQL skills extend further than you might think.
+:::
+
+## Setup
+
+```bash
+cd lab-3-embeddings
+
+# Create a GitHub token at https://github.com/settings/tokens
+# No special scopes needed: the default (no checkboxes) works
+export GITHUB_TOKEN="ghp_your_token_here"
+
+# Install dependencies
+uv sync
+```
+
+## Why embed product names?
+
+The Open Food Facts dataset has structured nutrition columns (energy, sugar, protein) that work well for filtering and aggregation. But the `product_name_en` column is free text: "Organic dark chocolate 85% cocoa", "Crunchy peanut butter", "Instant ramen noodles". You cannot GROUP BY meaning, and `WHERE product_name LIKE '%healthy%'` misses products that are healthy but don't use that word.
+
+Embedding the product name maps it to a point in 1536-dimensional space where **similar meanings land nearby**. "Crunchy peanut butter" and "Raw almond butter unsalted" end up close together (both nut spreads), while "Sparkling mineral water" is far away. This lets you:
+
+- **Search by concept**: find "healthy breakfast cereal" even though no product contains all three words
+- **Group by similarity**: cluster products by name meaning rather than by category strings (which are often missing or inconsistent in this dataset)
+- **Combine with structured data**: join the similarity score with nutriscore grade to ask "do products with similar names tend to have similar nutrition profiles?"
+
+The embedding model (`text-embedding-3-small`) was trained on billions of text pairs. You don't train anything here: you call an API, get back a vector, and store it in DuckDB alongside the structured columns you already know how to query.
+
+## Part 1: Your first embedding
+
+Run the starter script:
+
+```bash
+uv run python embed_sample.py
+```
+
+This embeds 10 food product names and prints the vectors. Open `embed_sample.py` to see how it works:
+
+```python
+from openai import OpenAI
+import os
+
+client = OpenAI(
+    base_url="https://models.inference.ai.azure.com",
+    api_key=os.environ["GITHUB_TOKEN"],
+)
+
+products = [
+    "Organic dark chocolate 85% cocoa",
+    "Whole milk 3.25% fat",
+    "Crunchy peanut butter",
+    "Sparkling mineral water",
+    "Frozen cheese pizza",
+]
+
+response = client.embeddings.create(
+    model="text-embedding-3-small",
+    input=products,
+)
+
+for item, product in zip(response.data, products):
+    vec = item.embedding
+    print(f"{product[:40]:40s}  dim={len(vec)}  first3={vec[:3]}")
+```
+
+### Understand
+
+1. What is the dimensionality of each embedding vector?
+2. The code uses `openai.OpenAI` but connects to GitHub, not OpenAI. What makes this possible?
+3. Why do we send product names in a batch (list) instead of one at a time?
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Look at the `dim=` value in the script output.
+2. What parameter in the `OpenAI()` constructor changes the API endpoint?
+3. Compare 5 individual API calls vs 1 call with 5 items. What is the overhead?
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. 1536 dimensions for `text-embedding-3-small`.
+2. `base_url`. The OpenAI Python SDK is a generic HTTP client for the OpenAI API shape. Any server implementing the same `/v1/embeddings` endpoint works: GitHub Models, Azure OpenAI, Ollama, etc. Change one line, switch providers.
+3. One batch request means 1 HTTP round trip instead of 5. Less network overhead, and the server processes the batch in a single forward pass. With 1,000+ products, the difference is substantial.
+:::
+::::
+
+## Part 2: Embed and store
+
+Run the batch embedding script:
+
+```bash
+uv run python embed_to_duckdb.py
+```
+
+This reads 1,000 products from the Open Food Facts dataset, embeds them, and stores the results in DuckDB. Open `embed_to_duckdb.py` to see the batch processing pattern:
+
+```python
+# Key pattern: batch embedding with rate-limit awareness
+import time
+
+BATCH_SIZE = 50  # GitHub Models handles 50 well within rate limits
+
+for i in range(0, len(products), BATCH_SIZE):
+    batch = products[i:i + BATCH_SIZE]
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=batch,
+    )
+    # Store in DuckDB...
+    if i + BATCH_SIZE < len(products):
+        time.sleep(0.5)  # gentle rate limiting
+```
+
+## Part 3: Similarity search in SQL
+
+Now the fun part. Query DuckDB to find similar products:
+
+```bash
+uv run python search.py "healthy breakfast cereal"
+```
+
+Under the hood, this runs:
+
+```sql
+SELECT
+    product_name,
+    nutriscore_grade,
+    ROUND(array_cosine_similarity(embedding, ?::FLOAT[1536]), 4) AS similarity
+FROM product_embeddings
+ORDER BY similarity DESC
+LIMIT 10;
+```
+
+Try different queries:
+
+- `"sugar free snack"`
+- `"high protein low fat"`
+- `"organic baby food"`
+- `"cheap cooking oil"`
+
+### Understand
+
+1. Why does "cheap cooking oil" still return results even though no product description says "cheap"?
+2. Look at the nutriscore grades of the top results. Do healthier-sounding queries return better nutri-scores?
+3. What happens if you search in French? (Many products in this dataset have French names.)
+
+:::: {.callout-tip collapse="true"}
+### Hints
+
+1. Does the model match exact words or meaning?
+2. Run several queries and compare the `nutriscore_grade` column across results.
+3. `text-embedding-3-small` was trained on multilingual text. Try `"céréales petit déjeuner"`.
+
+::: {.callout-note collapse="true"}
+### Answers
+
+1. Embeddings capture semantic meaning, not keyword overlap. "Cheap" maps near "budget" and "value"; "cooking oil" maps near "vegetable oil" and "sunflower oil". The model learned these associations from billions of text pairs.
+2. Healthier-sounding queries tend to return better grades, but not always. The embedding captures name meaning, not nutritional quality: a product called "Healthy Chocolate Cake" would score high on similarity to "healthy" but might have grade 'd'.
+3. Cross-language search works. The model understands French, so an English query can find French-named products if the meanings are similar. Searching in French returns French product names with good similarity scores.
+:::
+::::
+
+## Part 4: Scale and compare
+
+::: {.callout-note title="What you're practicing"}
+**Skill**: reasoning about API costs, rate limits, and storage tradeoffs before committing to a large job.
+
+**Why practice opportunities matter**: in production, embedding millions of items is a real cost decision. These exercises build the habit of estimating before running: "how long will this take, how much will it cost, is the quality improvement worth it?"
+:::
+
+### 4a. Batch size
+
+Edit `embed_to_duckdb.py` and change `BATCH_SIZE` from 50 to 10, then to 200. Time each run.
+
+**Predict first**: which is faster, and why?
+
+::: {.callout-tip collapse="true" title="What happened"}
+Larger batches reduce HTTP round trips (fewer requests, less overhead). But very large batches may hit the 64K token-per-request limit. At ~8 tokens per product name, 50 names is ~400 tokens: well within the limit. A batch of 200 names (~1,600 tokens) also fits. The bottleneck is the 15 requests/minute rate limit, not token count, so batch size 50-200 all finish in similar wall-clock time.
+:::
+
+### 4b. Model comparison
+
+Edit `embed_to_duckdb.py` to use `text-embedding-3-large` instead of `text-embedding-3-small`.
+
+```python
+response = client.embeddings.create(
+    model="text-embedding-3-large",  # 3072 dimensions vs 1536
+    input=batch,
+)
+```
+
+Re-embed the same 1,000 products. Compare:
+
+- Vector dimensionality (1536 vs 3072)
+- Storage size in DuckDB
+- Similarity search quality: do the top-10 results change?
+
+::: {.callout-warning icon="false" title="Cloud Economy"}
+**text-embedding-3-small**: 1536 dimensions. Paid API rate: ~\$0.02 per 1M tokens.
+**text-embedding-3-large**: 3072 dimensions. Paid API rate: ~\$0.13 per 1M tokens (6.5x more expensive).
+
+On GitHub Models free tier both are free, but the rate limit is the same. Larger vectors take more storage: 3072 floats x 4 bytes = 12 KB per product vs 6 KB.
+
+**At scale (1M products)**: small = ~6 GB vectors, large = ~12 GB. Is the quality difference worth 2x storage?
+:::
+
+### 4c. Cost projection
+
+You embedded 1,000 products. How much would it cost to embed the full 4.4M-row dataset on a paid API?
+
+::: {.callout-tip collapse="true" title="Back-of-envelope calculation"}
+Average product name: ~8 tokens. 4.4M products x 8 tokens = ~35M tokens.
+At \$0.02/1M tokens (text-embedding-3-small): ~\$0.70 total.
+Embeddings are surprisingly cheap. The bottleneck is usually rate limits, not cost.
+:::
+
+:::: {.callout-caution collapse="true"}
+## ☑️ Check yourself: embeddings and similarity search
+
+```{quizdown}
+---
+shuffleAnswers: true
+---
+
+### You embed 1,000 product names with text-embedding-3-small (1536 dimensions, 32-bit floats). How much storage do the vectors alone require?
+
+> Each dimension is a 32-bit float (4 bytes).
+
+1. [ ] ~1.5 KB (1 byte per dimension)
+  > Embeddings use 32-bit floats, not single bytes. Each dimension takes 4 bytes.
+1. [x] ~6 MB (1536 floats x 4 bytes x 1,000 products)
+  > 1536 x 4 = 6,144 bytes per vector. Times 1,000 products = ~6 MB. At 4.4M products, that grows to ~26 GB.
+1. [ ] ~1.5 MB (1536 integers x 1 byte x 1,000 products)
+  > Embeddings are floating-point numbers, not 1-byte integers. Each dimension takes 4 bytes.
+1. [ ] ~6 GB (one file per product)
+  > All vectors store compactly in a single DuckDB column. No need for separate files.
+
+### You search for "healthy breakfast cereal". The top result (similarity 0.82) has nutriscore 'a'. The 5th result (similarity 0.71) has nutriscore 'c'. Why doesn't higher similarity guarantee a better grade?
+
+> Think about what the embedding model was trained to capture.
+
+1. [x] Embeddings capture name meaning, not nutritional quality: "Healthy Chocolate Cake" would score high on similarity but might have a poor grade
+  > The model maps text to meaning-space. Product names that sound healthy cluster together, regardless of actual nutrition content.
+1. [ ] Cosine similarity below 0.8 is unreliable and should be ignored
+  > There is no universal reliability threshold. Similarity scores are relative within a dataset, and 0.71 is still a strong match.
+1. [ ] The embedding model was not trained on food-related text
+  > text-embedding-3-small was trained on broad web text, which includes food content. It understands food terms well.
+1. [ ] The nutriscore grades in the database are assigned randomly
+  > Nutriscore is a real nutritional scoring system computed from energy, sugar, protein, fiber, and other factors.
+
+### Match each observation to the concept it demonstrates.
+
+> Think about what embedding vectors represent and how the API works.
+
+- "Crunchy peanut butter" and "Raw almond butter" have high cosine similarity :: Semantic similarity
+  > Both are nut-based spreads. The model places semantically similar product names close in vector space.
+- Searching "sugar free snack" returns products that contain none of those exact words :: Semantic search
+  > Embeddings match meaning, not keywords. "Rice cakes unsweetened" is semantically close even without word overlap.
+- Sending 50 names in one API call is faster than 50 individual calls :: Batching
+  > One HTTP round trip instead of 50. The API processes the batch in a single forward pass through the model.
+- Switching from text-embedding-3-small to text-embedding-3-large doubles storage but barely changes top-10 results :: Model tradeoff
+  > Larger models capture finer distinctions, but for common product names the smaller model is often sufficient. Cost and storage scale with dimensions.
+- :: Fine-tuning
+  > Fine-tuning trains the model on your data. Here you used a pre-trained model as-is: no training, just inference via API.
+- :: Tokenization
+  > Tokenization splits text into subword pieces before embedding. It happens inside the model; you send plain text and get back a vector.
+```
+
+::::
+
+## Part 5: Extend
+
+::: {.callout-note title="Connect to other labs"}
+- **Lab 1**: Add an embedding asset to your Bruin pipeline. After the summary table is built, embed the grade descriptions and find which grades have similar product profiles.
+- **Lab 2**: Upload your DuckDB database with embeddings to EC2 and query it remotely. Or embed directly on EC2 where you have more bandwidth.
+- **Connecting project**: The food report uses embeddings to group products by name similarity, adding a "similar products" panel to the Quarto report.
+:::
+
+**Ideas for further practice:**
+
+1. Build a simple product recommender: given a product barcode, find the 5 most similar products by name embedding.
+2. Compare embedding similarity with category overlap: do products with similar embeddings share the same `categories` string?
+3. Try a clustering approach: run K-means on the embeddings and see if clusters align with nutriscore grades.

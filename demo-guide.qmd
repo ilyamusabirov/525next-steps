@@ -1,0 +1,362 @@
+---
+title: "Live Demo: SQL on the Cluster"
+subtitle: "Step-by-step instructor guide with timing, talking points, and code"
+---
+
+
+## Setup: EC2 gateway (~10 min before class)
+
+You only need the EC2 instance for Part 1 (DuckDB). The EMR cluster is launched later, during the transition.
+
+**Step 1.** Launch the gateway EC2 instance (from your laptop, inside this repo):
+
+```bash
+bash infra/create_gateway.sh
+```
+
+The script auto-discovers the AMI, public subnet, and security group, launches a `t3a.xlarge` (16 GB RAM) with the S3 instance profile attached, waits for it to start, and prints the public IP and SSH command.
+
+**Step 2.** Copy the demo scripts to the instance and run the setup:
+
+```bash
+scp -i ~/mds/mds-ilya-ec2.pem -r demos/sql-on-cluster ubuntu@<public-ip>:~/sql-on-cluster
+ssh -i ~/mds/mds-ilya-ec2.pem ubuntu@<public-ip>
+cd sql-on-cluster
+bash setup.sh
+```
+
+`setup.sh` installs uv, syncs packages (duckdb, boto3, ipykernel), registers a Jupyter kernel "SQL Demo (uv)", and creates the `/tmp/duckdb` spill directory.
+
+**Step 3.** Add the gateway to `~/.ssh/config` (the `create_gateway.sh` output prints the exact block to paste). Then connect VS Code via Remote SSH to `gateway`. Open the `~/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
+
+See the [Infrastructure page](infra.qmd) for architecture diagrams.
+
+
+## Part 1: DuckDB on EC2 (~20 min) {#part1}
+
+### Script: `01_duckdb_s3.py`
+
+Open in VS Code. Run each cell.
+
+#### Setup cell
+
+```python
+conn = duckdb.connect()
+conn.execute("SET memory_limit = '4GB';")
+conn.execute("SET threads = 4;")
+conn.execute("SET temp_directory = '/tmp/duckdb';")
+
+conn.execute("""
+    CREATE SECRET (
+        TYPE s3, PROVIDER credential_chain, REGION 'ca-central-1'
+    )
+""")
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Three settings + one credential line = full SQL on 22.5 GB of S3 parquet. No cluster, no YARN, no HDFS.
+
+`credential_chain` checks (in order): env vars, `~/.aws/credentials`, instance metadata. On EC2 with an instance profile, it picks up the role's temporary credentials automatically. No access keys in code.
+:::
+
+#### Query 1: Category summary (~4s)
+
+```python
+SELECT category, COUNT(*) AS n_reviews,
+       ROUND(AVG(rating), 2) AS avg_rating
+FROM read_parquet('{S3}', hive_partitioning=true)
+GROUP BY category
+ORDER BY n_reviews DESC
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Low-cardinality GROUP BY: the hash table has **4 entries** (~400 bytes). The time (~4s) is almost entirely S3 I/O: streaming 22.5 GB of parquet.
+:::
+
+#### Query 2: Filter + sort with LIMIT (~14s)
+
+```python
+SELECT asin, title, helpful_vote, rating
+FROM read_parquet('{S3}', hive_partitioning=true)
+WHERE helpful_vote > 0
+ORDER BY helpful_vote DESC
+LIMIT 20
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Top-k optimization: DuckDB tracks the top 20 in a **heap**, never sorts all 49M qualifying rows. O(n log k) with constant memory, not O(n log n) full sort.
+:::
+
+#### Query 3: Cross-category join (~19s)
+
+```python
+SELECT COUNT(*) AS shared_users FROM (
+    SELECT DISTINCT user_id
+    FROM ... WHERE category = 'Electronics' AND rating >= 4
+) e JOIN (
+    SELECT DISTINCT user_id
+    FROM ... WHERE category = 'Books' AND rating >= 4
+) b USING (user_id)
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Hive partitioning: DuckDB only reads `Electronics/` and `Books/` partitions, skips the rest. The two DISTINCT sets (~30M + ~20M user IDs) fit in 4 GB.
+:::
+
+**Key message:** DuckDB streams 22.5 GB through 4 GB of RAM. The data never fully loads. The bottleneck is not data size.
+
+
+### Script: `02_duckdb_limits.py`
+
+#### GROUP BY 10M products (~52s)
+
+```python
+SELECT parent_asin, COUNT(*) AS n_reviews, ROUND(AVG(rating), 2) AS avg_rating
+FROM read_parquet('{S3}', hive_partitioning=true)
+GROUP BY parent_asin
+ORDER BY n_reviews DESC LIMIT 20
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Walk through the hash table math on the board:
+
+| Component | Bytes |
+|---|---|
+| Key (`parent_asin` string, ~10 chars) | ~26 |
+| Hash value | 8 |
+| COUNT + SUM + COUNT for AVG | 24 |
+| Pointer / metadata | 16 |
+| **Total per entry** | **~100** |
+
+10M entries x 100 bytes = ~1 GB. With 4 thread-local partitions: 250 MB each. Fits in 4 GB.
+:::
+
+#### GROUP BY + WINDOW (~74s)
+
+Two memory-intensive operators back to back. Still fits, but pushing the limit.
+
+#### Boundary discussion
+
+::: {.callout-important icon="false" title="The boundary question (do on the board)"}
+Ask the class: what if we GROUP BY `user_id` instead of `parent_asin`?
+
+```
+10M products x 100 bytes = ~1 GB  -> fits in 4 GB
+50M users    x 100 bytes = ~5 GB  -> ???
+
+With 4 thread-local partitions:
+  50M / 4 = 12.5M entries/thread x 100 B = 1.25 GB/thread
+  4 threads x 1.25 GB = 5 GB minimum -> exceeds 4 GB limit
+```
+
+**Prediction**: this will OOM. Let them say it before you run it.
+:::
+
+#### Intentional OOM
+
+Run the cell. Let it fail. Read the error message together.
+
+#### Rescue attempt: 1 thread, 12 GB
+
+```python
+conn.execute("SET threads = 1;")
+conn.execute("SET memory_limit = '12GB';")
+```
+
+::: {.callout-tip icon="false" title="Talking points"}
+Fewer threads = fewer hash table partitions = less memory duplication. The tradeoff: much slower. This might work, but it is not a real solution.
+:::
+
+**Transition:** "Same SQL, same data. We just need more machines."
+
+
+## Launch EMR (~1 min to run, ~8 min to provision) {#launch-emr}
+
+Run this from your **laptop** (not the EC2 instance) while transitioning to Part 2. The cluster takes ~8 minutes to reach WAITING state, so launch it now and talk through the architecture while it provisions.
+
+**Step 1.** Make sure your AWS session is active:
+
+```bash
+aws sso login --profile ilya-ubc-aws-student
+```
+
+**Step 2.** Launch the cluster:
+
+```bash
+cd 525next-steps
+bash infra/create_spark_cluster.sh
+```
+
+The script auto-discovers public subnets, creates a 3-node EMR cluster (1 primary + 2 core, `m6a.xlarge`), and prints the cluster ID.
+
+**Step 3.** Check status (repeat until WAITING):
+
+```bash
+aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
+    --query 'Cluster.Status.State' \
+    --profile ilya-ubc-aws-student --region ca-central-1
+```
+
+**Step 4.** Get the primary node DNS:
+
+```bash
+aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
+    --query 'Cluster.MasterPublicDnsName' --output text \
+    --profile ilya-ubc-aws-student --region ca-central-1
+```
+
+**Step 5.** Add the primary node to your SSH config (see [Infrastructure page](infra.qmd#connecting-to-the-cluster) for the full config). Then connect:
+
+```bash
+ssh emr-primary   # uses ProxyJump through gateway
+```
+
+::: {.callout-tip icon="false" title="While the cluster provisions"}
+Use this time to show the [infrastructure overview diagram](infra.qmd#architecture): VS Code on laptop connects to the Gateway EC2 via SSH, the gateway jumps to the EMR primary node via ProxyJump within the VPC, and the cluster reads from S3.
+:::
+
+
+## Part 2: SparkSQL on EMR (~20 min) {#part2}
+
+Switch VS Code Remote SSH to the EMR primary node, or use a terminal with `ssh emr-primary`.
+
+Copy the Spark scripts to the primary node:
+
+```bash
+scp -o ProxyJump=gateway demos/sql-on-cluster/03_spark_sql.py hadoop@<emr-primary-ip>:~/
+scp -o ProxyJump=gateway demos/sql-on-cluster/04_spark_ml.py hadoop@<emr-primary-ip>:~/
+scp -o ProxyJump=gateway demos/sql-on-cluster/05_spark_fail.py hadoop@<emr-primary-ip>:~/
+```
+
+Or run directly via `spark-submit 03_spark_sql.py` from the primary node after copying.
+
+### Script: `03_spark_sql.py`
+
+#### Category summary: Spark ~7s vs DuckDB ~4s
+
+::: {.callout-tip icon="false" title="Talking points"}
+Spark is **slower** here. Cluster overhead: YARN job scheduling, task serialization, shuffle coordination. For a trivial 4-group aggregation, this overhead dominates. DuckDB runs in-process with no coordination.
+:::
+
+#### GROUP BY 10M products: Spark ~32s vs DuckDB ~52s
+
+::: {.callout-tip icon="false" title="Talking points"}
+Spark is **faster** here. 8 executor cores (2 core nodes x 4 vCPU) read S3 in parallel, compared to DuckDB's 4 threads on one machine. SparkSQL also has more total memory (~20 GB across executors vs 4 GB).
+:::
+
+#### GROUP BY + WINDOW: Spark ~27s vs DuckDB ~74s
+
+2.7x faster. Distributed memory and parallelism win on complex queries.
+
+#### GROUP BY 50M users: the query DuckDB couldn't do
+
+::: {.callout-important icon="false" title="This is the punchline"}
+SparkSQL completes this query. The hash table is distributed across executors, each in its own JVM heap. Combined memory: ~20 GB vs DuckDB's 4-12 GB.
+
+**While this runs**: open Spark UI at `http://localhost:4040` (VS Code auto-forwards the port).
+
+- Show the **Stages** tab: active stage, task distribution across executors
+- Show the **SQL** tab: physical plan with shuffle operators
+- Point out **shuffle read/write** bytes: the redistribution cost for GROUP BY
+:::
+
+#### Comparison table
+
+| Query | DuckDB (4 GB / 4 threads) | SparkSQL (3-node) |
+|---|---|---|
+| Category summary | ~4s | ~7s |
+| Filter + sort (LIMIT 20) | ~14s | ~5s |
+| GROUP BY 10M products | ~52s | ~32s |
+| GROUP BY + WINDOW | ~74s | ~27s |
+| Cross-category join | ~19s | ~13s |
+| GROUP BY 50M users | OOM | runs |
+
+Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
+
+### Script: `04_spark_ml.py` (if time)
+
+::: {.callout-tip icon="false" title="Talking points"}
+SparkSQL for feature engineering chained with MLlib for training. Same cluster, same session, no intermediate files. This is the Spark differentiator: SQL + ML in one pipeline.
+:::
+
+### Script: `05_spark_fail.py`
+
+::: {.callout-tip icon="false" title="Talking points"}
+Two intentional failures:
+
+1. **Column typo** (`review_score` instead of `rating`): `AnalysisException`. Look at driver stderr, Spark UI SQL tab.
+2. **Executor OOM** (`REPARTITION(1)` + `COLLECT_LIST`): simulates data skew. Look at Spark UI Stages tab, executor logs.
+
+Where to find logs:
+
+| What happened | Where to look |
+|---|---|
+| Query syntax/schema error | Driver stderr, Spark UI SQL tab |
+| Task OOM | Executor stderr, Spark UI Stages tab |
+| Job stuck | YARN ResourceManager (port 8088) |
+| Cluster terminated | EMR Console step logs |
+:::
+
+
+## Part 3: Transient cluster (~5 min, walkthrough) {#part3}
+
+This can be a walkthrough without running the scripts.
+
+### Show `infra/transient_step.sh`
+
+::: {.callout-tip icon="false" title="Talking points"}
+The batch pattern: submit a script, cluster starts, runs it, terminates. No SSH needed.
+
+`--auto-terminate` + `--steps` = fire and forget. You pay only for compute time.
+
+Compare with the interactive cluster from Part 2: you pay for idle time while debugging.
+:::
+
+### Show `infra/batch_user_summary.py`
+
+The DuckDB-OOM query (GROUP BY 50M users) as a standalone PySpark script that writes results to S3.
+
+
+## Stretch: Trino (~5 min, if time) {#stretch}
+
+### Show `infra/create_trino_cluster.sh`
+
+::: {.callout-tip icon="false" title="Talking points"}
+Third engine, same query. Trino runs **outside YARN** (its own coordinator/worker model), so it needs a dedicated cluster.
+
+Pipeline execution: starts returning results before the full scan completes.
+:::
+
+
+## Clean up
+
+**Terminate everything when done.** Both `create_gateway.sh` and `create_spark_cluster.sh` print the exact termination commands at the end. Copy-paste them:
+
+```bash
+# These are printed by the scripts -- use the actual IDs from your session
+aws emr terminate-clusters --cluster-ids j-XXXXXXXXXXXXX \
+    --profile ilya-ubc-aws-student --region ca-central-1
+
+aws ec2 terminate-instances --instance-ids i-XXXXXXXXXXXXX \
+    --profile ilya-ubc-aws-student --region ca-central-1
+```
+
+::: {.callout-warning icon="false" title="Cost if you forget"}
+EC2 t3a.xlarge: \$4.08/day. EMR 3-node: \$17.04/day.
+:::
+
+
+## Script index
+
+All scripts live in `demos/sql-on-cluster/`:
+
+| Script | Engine | What it shows | Run on |
+|---|---|---|---|
+| [`01_duckdb_s3.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/01_duckdb_s3.py) | DuckDB | Credential chain, streaming queries, hive partitioning | EC2 gateway |
+| [`02_duckdb_limits.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/02_duckdb_limits.py) | DuckDB | Hash table pressure, intentional OOM | EC2 gateway |
+| [`03_spark_sql.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/03_spark_sql.py) | SparkSQL | Same queries distributed, 50M-user GROUP BY | EMR primary |
+| [`04_spark_ml.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/04_spark_ml.py) | SparkSQL + MLlib | Feature engineering + model training | EMR primary |
+| [`05_spark_fail.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/05_spark_fail.py) | SparkSQL | Intentional failures, log reading | EMR primary |
+| [`setup.sh`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/setup.sh) | -- | Install uv, register kernel, create spill dir | EC2 gateway |
+
+**Textbook chapters**: [SQL on the Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4c_sql_on_cluster.html), [Observing Your Spark Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4a_spark_debugging.html)

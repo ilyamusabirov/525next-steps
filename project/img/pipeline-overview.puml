@@ -1,0 +1,31 @@
+@startuml
+scale 1.5
+skinparam defaultFontSize 11
+skinparam ActivityBackgroundColor #e3f2fd
+skinparam ActivityBorderColor #1565c0
+
+|Bruin pipeline|
+|Outside Bruin|
+
+|Bruin pipeline|
+start
+:Open Food Facts\n(parquet, 50K or 4.4M);
+:**raw_products** (SQL)\nRead parquet over HTTPS\nFilter to valid grades;
+note right: Quality checks:\nnot_null,\naccepted_values a-e
+:**clean_products** (Python)\nPydantic validation\nReject bad rows, normalize types;
+
+fork
+  :**nutrition_summary** (SQL)\nGROUP BY nutriscore_grade;
+  note right: Quality checks:\nunique, positive
+fork again
+  :**suspicious_products** (SQL)\nFlag grade/nutrition mismatches;
+fork again
+  :**product_embeddings** (Python)\nGitHub Models text-embedding-3-small\nStore vectors in DuckDB;
+end fork
+
+|Outside Bruin|
+:**train_model.py**\nHistGradientBoosting\nPredict grade from nutrition\nConfusion matrix;
+:**report.qmd** (Quarto)\nTables, charts, confusion matrix\nSimilar-product panel;
+stop
+
+@enduml

@@ -1,0 +1,3 @@
+name: food_quality_report
+default_connections:
+  duckdb: "duckdb-default"

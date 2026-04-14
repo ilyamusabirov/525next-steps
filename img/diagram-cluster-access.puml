@@ -1,0 +1,93 @@
+@startuml diagram-cluster-access
+title Connecting to an EMR Cluster — Two Access Patterns
+
+skinparam defaultFontSize 13
+skinparam maxMessageSize 140
+skinparam participant {
+  BackgroundColor #f8f9fa
+  BorderColor #6c757d
+}
+skinparam note {
+  BackgroundColor #fff9c4
+  BorderColor #f0c040
+}
+skinparam sequence {
+  ArrowColor #333
+  LifeLineBorderColor #aaa
+}
+
+actor "You\n(laptop)" as You
+participant "VS Code\n(local)" as VSCode
+participant "Gateway EC2\n(public subnet)" as Gateway
+participant "EMR Primary\n(public or private subnet)" as Primary
+participant "Spark UI\n(port 4040)" as SparkUI
+participant "History Server\n(port 18080)" as HistoryServer
+
+== Pattern A: VS Code Remote SSH (interactive development) ==
+
+note over You, Primary
+  **Goal**: run Python cells on the EMR primary node from VS Code on your laptop.
+  The Gateway EC2 acts as an SSH jump host. EMR nodes are often in a private subnet
+  or behind restrictive security groups, so you "hop" through the Gateway.
+end note
+
+You -> VSCode : Open VS Code
+VSCode -> Gateway : Remote SSH\n//~/.ssh/config: Host gateway//
+Gateway --> VSCode : connected (shell on Gateway)
+
+note over VSCode, Gateway
+  **For DuckDB**: you can work right here.
+  Open .py files, select "SQL Demo (uv)" kernel,
+  run cells. DuckDB reads S3 directly.
+end note
+
+VSCode -> Primary : SSH ProxyJump\n//~/.ssh/config: Host emr-primary\n  ProxyJump gateway//
+Primary --> VSCode : connected (shell on EMR primary)
+
+note over VSCode, Primary
+  **For SparkSQL**: VS Code is now on the EMR primary.
+  PySpark is pre-installed. Run cells with the system
+  Python or register a kernel with ipykernel.
+end note
+
+== Pattern B: SSH tunnels for web UIs (monitoring) ==
+
+note over You, HistoryServer
+  **Goal**: access Spark UI, History Server, and YARN ResourceManager
+  in your local browser, forwarded through the Gateway.
+end note
+
+You -> Gateway : ssh -NL 4040:emr-primary:4040\n       -L 18080:emr-primary:18080\n       -L 8088:emr-primary:8088\n       gateway
+Gateway -> Primary : TCP forward
+
+You -> SparkUI : http://localhost:4040\n//live stages, tasks, SQL plans//
+You -> HistoryServer : http://localhost:18080\n//completed job DAGs, stage durations//
+
+note over You, SparkUI
+  VS Code Remote SSH auto-forwards ports it detects.
+  If you open a notebook that prints "SparkUI at :4040",
+  VS Code offers to forward it automatically.
+end note
+
+== SSH config (one-time setup) ==
+
+note over You, Primary #e8f4e8
+  **~/.ssh/config**
+  Host gateway
+      HostName <gateway-public-ip>
+      User ubuntu
+      IdentityFile ~/.ssh/your-key.pem
+
+  Host emr-primary
+      HostName <emr-primary-private-ip>
+      User hadoop
+      IdentityFile ~/.ssh/vockey.pem
+      ProxyJump gateway
+
+  After this:
+    ssh gateway           → DuckDB host
+    ssh emr-primary       → EMR primary (via gateway hop)
+    VS Code Remote SSH    → either host
+end note
+
+@enduml
