@@ -8,6 +8,16 @@ subtitle: "Step-by-step instructor guide with timing, talking points, and code"
 
 You only need the EC2 instance for Part 1 (DuckDB). The EMR cluster is launched later, during the transition.
 
+::: {.callout-note collapse="true" title="VS Code: what to install locally (one-time)"}
+Install these extensions on your **laptop** (not on the remote machine). VS Code automatically installs its server-side component and forwards the Python/Jupyter extensions to the remote when you connect.
+
+| Extension | ID | What it does |
+|---|---|---|
+| Remote - SSH | `ms-vscode-remote.remote-ssh` | Opens a full VS Code window on a remote machine over SSH. All file editing, terminal, and extensions run on the remote; only the UI runs locally. |
+| Python | `ms-python.python` | Language support, linting, debugging. Auto-forwarded to the remote. |
+| Jupyter | `ms-toolsai.jupyter` | Runs `# %%` cell blocks in `.py` files as interactive notebook cells. Needs a kernel on the remote (setup.sh registers one). |
+:::
+
 **Step 1.** Make sure your AWS session is active:
 
 ```bash
@@ -64,6 +74,22 @@ cd 525next-steps/demos/sql-on-cluster && bash setup.sh
 :::
 
 **Step 5.** Connect VS Code via Remote SSH to `gateway`. Open the `~/525next-steps/demos/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
+
+::: {.callout-note collapse="true" title="First connection to a new node: what happens on the remote"}
+When VS Code connects to a new host for the first time, it:
+
+1. Copies and starts `vscode-server` in `~/.vscode-server/` (~30s on first connect, cached after that)
+2. Forwards the Python and Jupyter extensions to the remote automatically
+3. Discovers Jupyter kernels registered on the remote (setup.sh registered "SQL Demo (uv)" via `ipykernel install`)
+
+If the kernel picker is empty or shows the wrong Python, run on the remote terminal:
+
+```bash
+uv run python -m ipykernel install --user --name sql-demo --display-name "SQL Demo (uv)"
+```
+
+Then reload the VS Code window (Cmd+Shift+P > "Reload Window").
+:::
 
 
 ## Part 1: DuckDB on EC2 (~20 min) {#part1}
