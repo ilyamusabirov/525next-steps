@@ -207,7 +207,7 @@ conn.execute("SET memory_limit = '12GB';")
 Fewer threads = fewer hash table partitions = less memory duplication. The tradeoff: much slower. This might work, but it is not a real solution.
 :::
 
-**Transition:** "Same SQL, same data. We just need more machines."
+**Transition:** "DuckDB can be rescued on one machine, but you're fighting the hardware limits. Same SQL, same data: let's see what happens when we distribute the work."
 
 
 ## Launch EMR (~1 min to run, ~8 min to provision) {#launch-emr}
@@ -322,7 +322,7 @@ Same DISTINCT + JOIN query. Spark builds two distributed DISTINCT sets, then has
 ~50M unique users. DuckDB OOM'd because the hash table (~5 GB) exceeded its 4 GB memory limit. Spark distributes the hash table across executors, each with its own JVM heap. Combined memory: ~20 GB.
 
 ::: {.callout-important icon="false" title="This is the punchline"}
-SparkSQL completes this query.
+SparkSQL completes this query at full parallelism, without consuming all available memory on one machine.
 
 **While this runs**: open Spark UI at `http://localhost:4040` (tunneled via LocalForward in SSH config).
 
@@ -340,7 +340,9 @@ SparkSQL completes this query.
 | GROUP BY 10M products | ~52s | ~32s |
 | GROUP BY + WINDOW | ~74s | ~27s |
 | Cross-category join | ~19s | ~13s |
-| GROUP BY 50M users | OOM | runs |
+| GROUP BY 50M users | OOM at 4 GB\* | runs |
+
+\*DuckDB **can** finish this query on one machine: enable spill-to-disk, increase memory to 12 GB, reduce to 1 thread. It works, but it consumes most of the machine's 16 GB and runs much slower (single-threaded, disk I/O for the spilled hash table). SparkSQL distributes the hash table across nodes: more total memory, more parallelism.
 
 Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
 

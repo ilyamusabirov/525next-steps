@@ -160,7 +160,10 @@ print("""
 | GROUP BY 10M products   |            ~52s |              ~32s |
 | GROUP BY + WINDOW       |            ~74s |              ~27s |
 | Cross-category join     |            ~19s |              ~13s |
-| GROUP BY 50M users      |         OOM     |              runs |
+| GROUP BY 50M users      | OOM (or slow*)  |              runs |
+
+* DuckDB can finish the 50M-user query with spill-to-disk + more memory
+  + fewer threads, but it consumes most of the machine and is much slower.
 
 Cost: DuckDB on t3a.xlarge = $0.15/hr
       SparkSQL on 3-node EMR = $0.71/hr

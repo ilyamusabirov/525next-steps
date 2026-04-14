@@ -174,12 +174,21 @@ except Exception as e:
 # The limit is not data size but **intermediate structure size**:
 #
 # - 4 categories (GROUP BY category): hash table ~400 bytes -> trivial
-# - 10M products (GROUP BY parent_asin): hash table ~1 GB -> fits
-# - 50M users (GROUP BY user_id): hash table ~5 GB -> OOM at 4 GB
+# - 10M products (GROUP BY parent_asin): hash table ~1 GB -> fits in RAM
+# - 50M users (GROUP BY user_id): hash table ~5 GB -> exceeds 4 GB RAM
 #
-# **Rule of thumb:** DuckDB handles datasets 5-10x larger than
-# memory_limit on hive-partitioned parquet. The breaking point
-# is GROUP BY cardinality, not data size.
+# DuckDB **can** finish the 50M-user query on one machine: enable
+# spill-to-disk, give it more memory, reduce threads. It works,
+# but you're consuming most of the machine and running much slower.
 #
-# When you hit this wall: SparkSQL distributes the hash table
-# across the cluster. Same SQL, different engine.
+# **The real question is not "can it run?" but "at what cost?"**
+#
+# | Approach | 50M-user GROUP BY | Tradeoff |
+# |----------|-------------------|----------|
+# | DuckDB 4 GB, no spill | OOM | - |
+# | DuckDB 12 GB, 1 thread, spill | Succeeds (slow) | Uses most of 16 GB machine, single-threaded |
+# | SparkSQL 3-node cluster | Succeeds (fast) | Costs $0.71/hr vs $0.15/hr |
+#
+# SparkSQL distributes the hash table across nodes: more total memory,
+# more parallelism, and the machine is not pegged at its limits.
+# Same SQL, different engine.
