@@ -182,6 +182,10 @@ With 4 thread-local partitions:
 
 #### Intentional OOM
 
+::: {.callout-note icon="false" title="Why we disable spill-to-disk"}
+The cell disables `temp_directory` before running the query. Without this, DuckDB silently spills the hash table overflow to disk and the query succeeds (slowly). Disabling it isolates the memory limit so the OOM is visible.
+:::
+
 Run the cell. Let it fail. Read the error message together.
 
 #### Rescue attempt: 1 thread, 12 GB

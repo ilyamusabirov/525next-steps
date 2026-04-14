@@ -28,6 +28,9 @@ conn.execute("""
 S3 = "s3://dsci525-data-2026/amazon_reviews/**/*.parquet"
 
 # %% Query 4: GROUP BY parent_asin (~10M unique products)
+# For each of ~10 million products, count reviews and average rating.
+# DuckDB must build a hash table with one entry per product.
+# 10M entries x ~100 bytes each = ~1 GB. Fits in our 4 GB budget.
 t0 = time.time()
 result = conn.execute(f"""
     SELECT parent_asin,
@@ -56,6 +59,10 @@ result
 # each holds ~250 MB. Total ~1-1.5 GB. Fits in the 4 GB budget.
 
 # %% Query 5: GROUP BY + WINDOW (heaviest query)
+# Find the top 10 most-reviewed products in each category.
+# This needs two expensive operators back to back:
+# (1) a hash table for GROUP BY, then (2) a window buffer for ROW_NUMBER.
+# Both compete for the same 4 GB memory budget.
 t0 = time.time()
 result = conn.execute(f"""
     SELECT * FROM (
@@ -84,14 +91,21 @@ result
 # - ~50M unique users x 100 bytes = ~5 GB hash table -> ??? at 4 GB
 #
 # With 4 threads, DuckDB partitions the hash table. Each thread
-# builds its own slice. 4 slices x ~1.25 GB = ~5 GB minimum.
-# Plus overhead for the partitioning itself: 7-10 GB needed.
+# builds its own slice: 50M / 4 = 12.5M entries per thread.
+# 4 slices x 12.5M x 100 bytes = ~5 GB just for the hash table.
+# On top of that, DuckDB needs memory for S3 read buffers,
+# parquet decompression, and the ORDER BY sort buffer.
+# Total: well over 4 GB. This will not fit.
 #
 # **This will OOM.** Let's try it.
 
 # %% INTENTIONAL FAILURE: GROUP BY user_id (~50M unique users)
+# Disable spill-to-disk so the hash table must fit entirely in RAM.
+# Without this, DuckDB would silently spill the overflow to /tmp/duckdb
+# and succeed (slowly). We want to isolate the memory limit.
+conn.execute("SET temp_directory = '';")
 print("Attempting GROUP BY on ~50M unique user IDs...")
-print("memory_limit = 4GB, threads = 4")
+print("memory_limit = 4GB, threads = 4, spill-to-disk = OFF")
 print()
 t0 = time.time()
 try:
@@ -111,24 +125,30 @@ except Exception as e:
     print()
     print("Why:")
     print("  ~50M unique users x ~100 bytes/entry = ~5 GB hash table")
-    print("  4 thread-local partitions -> 7-10 GB needed")
-    print("  memory_limit = 4 GB -> does not fit")
+    print("  With 4 threads: 4 partitions x 12.5M entries x 100 B = ~5 GB")
+    print("  Plus S3 buffers, decompression, sort buffer -> well over 4 GB")
+    print("  memory_limit = 4 GB, spill disabled -> does not fit")
 
 # %% [markdown]
 # ## What are our options?
 #
 # | Option | Tradeoff |
 # |--------|----------|
-# | Reduce threads to 1 | Fewer partitions, but much slower |
+# | Enable spill-to-disk | Hash table overflows to EBS; slower but works if disk is big enough |
+# | Reduce threads to 1 | Fewer hash table partitions, but much slower |
 # | Increase memory_limit to 12 GB | Uses most of our 16 GB machine |
 # | Use SparkSQL on EMR | Distributes hash table across nodes |
 #
-# Let's try option 1 first: rescue with fewer threads.
+# Let's try option 1 first: rescue with fewer threads + spill-to-disk.
 
 # %% Rescue attempt: 1 thread, 12 GB
+# Re-enable spill-to-disk for a fair retry.
+# Fewer threads = fewer hash table partitions = less memory duplication.
+# But single-threaded is much slower than 4 threads.
+conn.execute("SET temp_directory = '/tmp/duckdb';")
 conn.execute("SET threads = 1;")
 conn.execute("SET memory_limit = '12GB';")
-print("Retrying: threads=1, memory_limit=12GB")
+print("Retrying: threads=1, memory_limit=12GB, spill-to-disk = ON")
 t0 = time.time()
 try:
     result = conn.execute(f"""

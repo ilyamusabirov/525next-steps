@@ -94,6 +94,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
     --security-group-ids "${SG_ID}" \
     --associate-public-ip-address \
     --iam-instance-profile "Name=${INSTANCE_PROFILE}" \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":32,"VolumeType":"gp3"}}]' \
     --tag-specifications \
         "ResourceType=instance,Tags=[{Key=Name,Value=sql-demo-gateway}]" \
     --query 'Instances[0].InstanceId' \

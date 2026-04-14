@@ -29,7 +29,9 @@ spark = SparkSession.builder \
 df = spark.read.parquet("s3://dsci525-data-2026/amazon_reviews/")
 df.createOrReplaceTempView("reviews")
 
-# This will fail: 'review_score' does not exist (it's called 'rating')
+# This will fail: 'review_score' does not exist (the column is called 'rating').
+# Spark catches this at query planning time (before scanning any data).
+# The AnalysisException message tells you exactly which column is missing.
 try:
     spark.sql("""
         SELECT category, AVG(review_score) AS avg_score
@@ -52,8 +54,10 @@ except Exception as e:
 # This simulates a data skew problem.
 
 # %%
+# Force all data to a single partition, then try to collect every review title
+# per user into a list. This simulates extreme data skew: one executor gets
+# all the data, runs out of heap memory, and crashes with OutOfMemoryError.
 try:
-    # Repartition to 1 partition forces all data through one executor
     spark.sql("""
         SELECT /*+ REPARTITION(1) */
             user_id, COLLECT_LIST(title) AS all_titles

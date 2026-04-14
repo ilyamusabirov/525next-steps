@@ -37,6 +37,8 @@ S3 = "s3://dsci525-data-2026/amazon_reviews/**/*.parquet"
 print("Connected. DuckDB version:", duckdb.__version__)
 
 # %% Quick look: what's in this dataset?
+# How big is the data? How many categories? What year range?
+# This is a sanity check: make sure DuckDB can reach S3 and read the parquet.
 t0 = time.time()
 conn.execute(f"""
     SELECT
@@ -48,6 +50,9 @@ conn.execute(f"""
 # ~207M reviews, 4 categories, 1996-2023
 
 # %% Query 1: Category summary (low-cardinality GROUP BY = streaming)
+# For each product category, count reviews and compute the average rating.
+# Only 4 categories, so the hash table is tiny (~400 bytes).
+# This query is bottlenecked by S3 read speed, not by computation.
 t0 = time.time()
 result = conn.execute(f"""
     SELECT category,
@@ -66,6 +71,9 @@ result
 # The time is almost entirely S3 I/O (streaming 22.5 GB).
 
 # %% Query 2: Filter + sort with LIMIT (top-k optimization)
+# Find the 20 most-helpful reviews across all 207M rows.
+# DuckDB does NOT sort all 49M qualifying rows. It keeps a small heap
+# of size 20 and only inserts a row if it beats the current minimum.
 t0 = time.time()
 result = conn.execute(f"""
     SELECT asin, title, helpful_vote, rating
@@ -83,6 +91,10 @@ result
 # streams, discards everything else. Memory usage is constant.
 
 # %% Query 3: Cross-category join (two DISTINCT sets + hash join)
+# How many users gave 4+ star reviews in BOTH Electronics and Books?
+# DuckDB builds two sets of distinct user IDs (one per category),
+# then hash-joins them. Hive partitioning means it only reads those
+# two category folders from S3, skipping the rest entirely.
 t0 = time.time()
 result = conn.execute(f"""
     SELECT COUNT(*) AS shared_users FROM (

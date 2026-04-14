@@ -23,6 +23,9 @@ df = spark.read.parquet("s3://dsci525-data-2026/amazon_reviews/")
 df.createOrReplaceTempView("reviews")
 
 # %% Step 1: Feature engineering with SparkSQL
+# Aggregate 207M raw reviews into product-level features:
+# review count, average rating, rating spread, helpfulness, verified ratio, text length.
+# Only products with 10+ reviews since 2020 (enough signal to train on).
 t0 = time.time()
 features = spark.sql("""
     SELECT
@@ -44,6 +47,8 @@ print(f"Feature engineering: {time.time()-t0:.1f}s, {n_products} products")
 features.show(5)
 
 # %% Step 2: Assemble feature vector
+# MLlib expects a single "features" column containing a dense vector.
+# VectorAssembler packs our 5 numeric columns into that format.
 feature_cols = [
     "review_count", "rating_spread",
     "avg_helpful", "verified_ratio", "avg_text_length"
@@ -55,6 +60,8 @@ train, test = ml_data.randomSplit([0.8, 0.2], seed=42)
 print(f"Train: {train.count()}, Test: {test.count()}")
 
 # %% Step 3: Train a Random Forest
+# Train a Random Forest to predict avg_rating from the product features.
+# Training is distributed: each tree is built on a different executor.
 t0 = time.time()
 rf = RandomForestRegressor(
     featuresCol="features",
@@ -66,6 +73,7 @@ model = rf.fit(train)
 print(f"Training: {time.time()-t0:.1f}s")
 
 # %% Step 4: Evaluate
+# Run the trained model on the test set and compute RMSE.
 predictions = model.transform(test)
 evaluator = RegressionEvaluator(
     labelCol="avg_rating", predictionCol="prediction", metricName="rmse"
@@ -76,6 +84,7 @@ print(f"RMSE: {rmse:.4f}")
 predictions.select("avg_rating", "prediction").show(10)
 
 # %% Feature importance
+# Which features matter most? Random Forest gives Gini importances.
 import pandas as pd
 importances = model.featureImportances.toArray()
 pd.DataFrame({

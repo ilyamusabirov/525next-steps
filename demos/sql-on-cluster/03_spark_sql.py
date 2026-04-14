@@ -34,11 +34,16 @@ df.createOrReplaceTempView("reviews")
 print(f"Partitions: {df.rdd.getNumPartitions()}")
 
 # %% Row count
+# Quick sanity check: count all rows to verify Spark can read the S3 data.
+# This also forces Spark to discover all parquet files (lazy until first action).
 t0 = time.time()
 spark.sql("SELECT COUNT(*) AS total_reviews FROM reviews").show()
 print(f"{time.time()-t0:.1f}s")
 
 # %% Query 1: Category summary
+# Same query as DuckDB Query 1: count reviews per category.
+# Only 4 groups, so the distributed shuffle is overkill here.
+# Spark is slower (~7s vs DuckDB ~4s) because of YARN scheduling overhead.
 t0 = time.time()
 spark.sql("""
     SELECT category,
@@ -51,6 +56,9 @@ spark.sql("""
 print(f"Category summary: {time.time()-t0:.1f}s")
 
 # %% Query 2: Filter + sort
+# Find the 20 most-helpful reviews across 207M rows.
+# Spark distributes the top-k selection across executors,
+# then merges the per-executor top-20 lists on the driver.
 t0 = time.time()
 spark.sql("""
     SELECT asin, title, helpful_vote, rating
@@ -62,6 +70,9 @@ spark.sql("""
 print(f"Filter + sort: {time.time()-t0:.1f}s")
 
 # %% Query 3: GROUP BY parent_asin (~10M products)
+# For each of ~10M products, count reviews and average rating.
+# The hash table is distributed across executors (each holds a slice).
+# 8 executor cores read S3 in parallel vs DuckDB's 4 threads on one machine.
 t0 = time.time()
 spark.sql("""
     SELECT parent_asin,
@@ -76,6 +87,9 @@ print(f"GROUP BY 10M products: {time.time()-t0:.1f}s")
 # DuckDB: 52s. SparkSQL: ~32s on 3-node cluster.
 
 # %% Query 4: GROUP BY + WINDOW
+# Top 10 most-reviewed products per category.
+# Two expensive operators: GROUP BY builds a distributed hash table,
+# then ROW_NUMBER() runs a window sort on each category partition.
 t0 = time.time()
 spark.sql("""
     SELECT * FROM (
@@ -92,6 +106,9 @@ print(f"GROUP BY + WINDOW: {time.time()-t0:.1f}s")
 # DuckDB: 74s. SparkSQL: ~27s.
 
 # %% Query 5: the one DuckDB couldn't do -- GROUP BY user_id
+# ~50M unique users. DuckDB OOM'd because the hash table (~5 GB)
+# exceeded its 4 GB memory limit. Spark distributes the hash table
+# across executors, each with its own JVM heap. Combined: ~20 GB.
 t0 = time.time()
 spark.sql("""
     SELECT user_id,
@@ -118,6 +135,9 @@ print(f"GROUP BY ~50M users: {time.time()-t0:.1f}s")
 # than DuckDB. On large queries, the distributed memory wins.
 
 # %% Cross-category join
+# How many users gave 4+ star reviews in BOTH Electronics and Books?
+# Spark builds two distributed DISTINCT sets, then hash-joins them.
+# Same logic as DuckDB Query 3, but the join runs across the cluster.
 t0 = time.time()
 spark.sql("""
     SELECT COUNT(*) AS shared_users FROM (
