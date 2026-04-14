@@ -8,7 +8,13 @@ subtitle: "Step-by-step instructor guide with timing, talking points, and code"
 
 You only need the EC2 instance for Part 1 (DuckDB). The EMR cluster is launched later, during the transition.
 
-**Step 1.** From your laptop, inside this repo, launch the gateway:
+**Step 1.** Make sure your AWS session is active:
+
+```bash
+aws sso login --profile ilya-ubc-aws-student
+```
+
+**Step 2.** From your laptop, inside this repo, launch the gateway:
 
 ```bash
 bash infra/create_gateway.sh
@@ -16,7 +22,7 @@ bash infra/create_gateway.sh
 
 The script launches a `t3a.xlarge` (16 GB RAM) with the S3 instance profile and SSH security group attached. It waits for the instance to start and prints the public IP.
 
-**Step 2.** Add the gateway to your `~/.ssh/config` (the script prints this block, paste it):
+**Step 3.** Add the gateway to your `~/.ssh/config` (the script prints this block, paste it):
 
 ```
 Host gateway
@@ -25,7 +31,7 @@ Host gateway
     IdentityFile ~/mds/mds-ilya-ec2.pem
 ```
 
-**Step 3.** SSH in via the alias, install git, clone the repo, and run setup:
+**Step 4.** SSH in via the alias, install git, clone the repo, and run setup:
 
 ```bash
 ssh gateway
@@ -57,7 +63,7 @@ cd 525next-steps/demos/sql-on-cluster && bash setup.sh
 ```
 :::
 
-**Step 4.** Connect VS Code via Remote SSH to `gateway`. Open the `~/525next-steps/demos/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
+**Step 5.** Connect VS Code via Remote SSH to `gateway`. Open the `~/525next-steps/demos/sql-on-cluster/` folder. Open `01_duckdb_s3.py`, select the "SQL Demo (uv)" kernel, run the first cell to verify.
 
 
 ## Part 1: DuckDB on EC2 (~20 min) {#part1}
