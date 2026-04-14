@@ -68,6 +68,10 @@ Open in VS Code. Run each cell.
 
 #### Setup cell
 
+::: {.callout-note collapse="true" title="Before: what we're configuring"}
+Three settings + one credential line = full SQL on 22.5 GB of S3 parquet. No cluster, no YARN, no HDFS. The memory limit (4 GB) and thread count (4) are intentionally low: we want to show where DuckDB hits the wall later.
+:::
+
 ```python
 conn = duckdb.connect()
 conn.execute("SET memory_limit = '4GB';")
@@ -81,15 +85,15 @@ conn.execute("""
 """)
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
-Three settings + one credential line = full SQL on 22.5 GB of S3 parquet. No cluster, no YARN, no HDFS.
-
+::: {.callout-tip collapse="true" title="After: what to highlight"}
 `credential_chain` checks (in order): env vars, `~/.aws/credentials`, instance metadata. On EC2 with an instance profile, it picks up the role's temporary credentials automatically. No access keys in code.
 :::
 
 #### Query 1: Category summary (~4s)
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 For each product category, count reviews and compute the average rating. Only 4 categories, so the hash table is tiny (~400 bytes). This query is bottlenecked by S3 read speed, not computation.
+:::
 
 ```python
 SELECT category, COUNT(*) AS n_reviews,
@@ -99,13 +103,15 @@ GROUP BY category
 ORDER BY n_reviews DESC
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Low-cardinality GROUP BY: the hash table has **4 entries** (~400 bytes). The time (~4s) is almost entirely S3 I/O: streaming 22.5 GB of parquet.
 :::
 
 #### Query 2: Filter + sort with LIMIT (~14s)
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 Find the 20 most-helpful reviews across all 207M rows. DuckDB does NOT sort all 49M qualifying rows: it keeps a small heap of size 20 and only inserts a row if it beats the current minimum.
+:::
 
 ```python
 SELECT asin, title, helpful_vote, rating
@@ -115,13 +121,15 @@ ORDER BY helpful_vote DESC
 LIMIT 20
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Top-k optimization: DuckDB tracks the top 20 in a **heap**, never sorts all 49M qualifying rows. O(n log k) with constant memory, not O(n log n) full sort.
 :::
 
 #### Query 3: Cross-category join (~19s)
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 How many users gave 4+ star reviews in BOTH Electronics and Books? DuckDB builds two sets of distinct user IDs (one per category), then hash-joins them. Hive partitioning means it only reads those two category folders from S3, skipping the rest entirely.
+:::
 
 ```python
 SELECT COUNT(*) AS shared_users FROM (
@@ -133,18 +141,20 @@ SELECT COUNT(*) AS shared_users FROM (
 ) b USING (user_id)
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Hive partitioning: DuckDB only reads `Electronics/` and `Books/` partitions, skips the rest. The two DISTINCT sets (~30M + ~20M user IDs) fit in 4 GB.
-:::
 
 **Key message:** DuckDB streams 22.5 GB through 4 GB of RAM. The data never fully loads. The bottleneck is not data size.
+:::
 
 
 ### Script: `02_duckdb_limits.py`
 
 #### GROUP BY 10M products (~52s)
 
-For each of ~10 million products, count reviews and average rating. DuckDB must build a hash table with one entry per product.
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+For each of ~10 million products, count reviews and average rating. DuckDB must build a hash table with one entry per product. This is the first query where the intermediate structure (hash table) is large enough to matter.
+:::
 
 ```python
 SELECT parent_asin, COUNT(*) AS n_reviews, ROUND(AVG(rating), 2) AS avg_rating
@@ -153,7 +163,7 @@ GROUP BY parent_asin
 ORDER BY n_reviews DESC LIMIT 20
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Walk through the hash table math on the board:
 
 | Component | Bytes |
@@ -169,7 +179,13 @@ Walk through the hash table math on the board:
 
 #### GROUP BY + WINDOW (~74s)
 
-Find the top 10 most-reviewed products in each category. This needs two expensive operators back to back: a hash table for GROUP BY, then a window buffer for ROW_NUMBER. Both compete for the same 4 GB memory budget. Still fits, but pushing the limit.
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+Find the top 10 most-reviewed products in each category. This needs two expensive operators back to back: a hash table for GROUP BY, then a window buffer for ROW_NUMBER. Both compete for the same 4 GB memory budget.
+:::
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
+Still fits, but pushing the limit. Two memory-intensive operators back to back: hash table (~1 GB) + window sort buffer. DuckDB is running close to its 4 GB ceiling.
+:::
 
 #### Boundary discussion
 
@@ -198,16 +214,20 @@ Run the cell. Let it fail. Read the error message together.
 
 #### Rescue attempt: 1 thread, 12 GB
 
+::: {.callout-note collapse="true" title="Before: what we're trying"}
+Re-enable spill-to-disk, drop to 1 thread, raise memory to 12 GB. Fewer threads = fewer hash table partitions = less memory duplication. The tradeoff: much slower.
+:::
+
 ```python
 conn.execute("SET threads = 1;")
 conn.execute("SET memory_limit = '12GB';")
 ```
 
-::: {.callout-tip icon="false" title="Talking points"}
-Fewer threads = fewer hash table partitions = less memory duplication. The tradeoff: much slower. This might work, but it is not a real solution.
-:::
+::: {.callout-tip collapse="true" title="After: results and performance"}
+DuckDB can finish, but it consumes most of the machine's 16 GB and runs single-threaded. Not a real solution for production.
 
 **Transition:** "DuckDB can be rescued on one machine, but you're fighting the hardware limits. Same SQL, same data: let's see what happens when we distribute the work."
+:::
 
 ::: {.callout-note collapse="true" title="Scale up vs scale out: when does a cluster beat a bigger machine?"}
 
@@ -274,7 +294,7 @@ The `LocalForward` lines tunnel the Spark UI (4040), History Server (18080), and
 ssh emr-primary
 ```
 
-::: {.callout-tip icon="false" title="While the cluster provisions"}
+::: {.callout-tip collapse="true" title="While the cluster provisions (~8 min)"}
 Use this time to show the [infrastructure overview diagram](infra.qmd#architecture): VS Code on laptop connects to the Gateway EC2 via SSH, the gateway jumps to the EMR primary node via ProxyJump within the VPC, and the cluster reads from S3.
 :::
 
@@ -316,40 +336,66 @@ spark-submit 03_spark_sql.py 2>/dev/null
 
 #### Category summary: Spark ~7s vs DuckDB ~4s
 
-Same query as DuckDB Query 1: count reviews per category. Only 4 groups, so the distributed shuffle is overkill here.
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+Same query as DuckDB Query 1: count reviews per category. Only 4 groups, so the distributed shuffle is overkill here. Watch for Spark being slower on this trivial aggregation.
+:::
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Spark is **slower** here. Cluster overhead: YARN job scheduling, task serialization, shuffle coordination. For a trivial 4-group aggregation, this overhead dominates. DuckDB runs in-process with no coordination.
 :::
 
 #### Filter + sort: Spark ~5s vs DuckDB ~14s
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 Same top-20 most-helpful query. Spark distributes the top-k selection across executors, then merges the per-executor top-20 lists on the driver.
+:::
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
+Spark is **faster** here (~5s vs ~14s). More S3 read parallelism (8 executor cores vs 4 DuckDB threads) matters for this scan-heavy query. The top-k merge is trivial.
+:::
 
 #### GROUP BY 10M products: Spark ~32s vs DuckDB ~52s
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 Same 10M-product aggregation. The hash table is distributed across executors, each holding a slice. 8 executor cores read S3 in parallel vs DuckDB's 4 threads on one machine.
+:::
 
-::: {.callout-tip icon="false" title="Talking points"}
+::: {.callout-tip collapse="true" title="After: results and performance"}
 Spark is **faster** here. 8 executor cores (2 core nodes x 4 vCPU) read S3 in parallel, compared to DuckDB's 4 threads on one machine. SparkSQL also has more total memory (~20 GB across executors vs 4 GB).
 :::
 
 #### GROUP BY + WINDOW: Spark ~27s vs DuckDB ~74s
 
-Top 10 most-reviewed products per category. Two expensive operators: GROUP BY builds a distributed hash table, then ROW_NUMBER() runs a window sort on each category partition. 2.7x faster: distributed memory and parallelism win on complex queries.
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+Top 10 most-reviewed products per category. Two expensive operators: GROUP BY builds a distributed hash table, then ROW_NUMBER() runs a window sort on each category partition.
+:::
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
+2.7x faster. Distributed memory and parallelism win on complex queries with multiple memory-intensive operators. DuckDB had both operators competing for the same 4 GB budget; Spark splits them across executors.
+:::
 
 #### Cross-category join: Spark ~13s vs DuckDB ~19s
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 Same DISTINCT + JOIN query. Spark builds two distributed DISTINCT sets, then hash-joins them across the cluster.
+:::
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
+Modest speedup (~13s vs ~19s). The join itself is small; the win is mostly S3 read parallelism.
+:::
 
 #### GROUP BY 50M users: the query DuckDB couldn't do
 
+::: {.callout-note collapse="true" title="Before: what we're doing"}
 ~50M unique users. DuckDB OOM'd because the hash table (~5 GB) exceeded its 4 GB memory limit. Spark distributes the hash table across executors, each with its own JVM heap. Combined memory: ~20 GB.
 
-::: {.callout-important icon="false" title="This is the punchline"}
+**While this runs**: open Spark UI at `http://localhost:4040` (tunneled via LocalForward in SSH config).
+:::
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
 SparkSQL completes this query at full parallelism, without consuming all available memory on one machine.
 
-**While this runs**: open Spark UI at `http://localhost:4040` (tunneled via LocalForward in SSH config).
+In the Spark UI:
 
 - Show the **Stages** tab: active stage, task distribution across executors
 - Show the **SQL** tab: physical plan with shuffle operators
@@ -373,37 +419,40 @@ Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
 
 ### Script: `04_spark_ml.py` (if time)
 
-```bash
-spark-submit 04_spark_ml.py 2>/dev/null
-```
-
-Four steps in one pipeline:
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+SparkSQL for feature engineering chained with MLlib for training. Same cluster, same session, no intermediate files. Four steps in one pipeline:
 
 1. **Feature engineering** (SparkSQL): aggregate 207M reviews into product-level features (review count, avg rating, rating spread, helpfulness, verified ratio, text length). Only products with 10+ reviews since 2020.
 2. **Vector assembly** (MLlib): pack numeric columns into a single feature vector.
 3. **Train** a Random Forest to predict avg_rating from product features. Training is distributed: each tree is built on a different executor.
 4. **Evaluate**: RMSE on held-out test set, plus feature importances.
+:::
 
-::: {.callout-tip icon="false" title="Talking points"}
-SparkSQL for feature engineering chained with MLlib for training. Same cluster, same session, no intermediate files. This is the Spark differentiator: SQL + ML in one pipeline.
+```bash
+spark-submit 04_spark_ml.py 2>/dev/null
+```
+
+::: {.callout-tip collapse="true" title="After: results and performance"}
+SQL + ML in one pipeline, no intermediate files, no data movement between systems. This is the Spark differentiator: one cluster handles everything from raw S3 data to trained model.
 :::
 
 ### Script: `05_spark_fail.py`
+
+::: {.callout-note collapse="true" title="Before: what we're doing"}
+Two intentional failures to show how to read Spark error messages and find logs. Do NOT suppress stderr here (`2>/dev/null`): the whole point is to see the error messages.
+
+1. **Column typo** (`review_score` instead of `rating`): Spark catches this at query planning time before scanning any data.
+2. **Executor OOM**: force all data to one partition with `REPARTITION(1)`, then `COLLECT_LIST` every review title per user. One executor gets everything, runs out of heap, crashes.
+:::
 
 ```bash
 spark-submit 05_spark_fail.py
 ```
 
-Do NOT suppress stderr here: the whole point is to see the error messages.
+::: {.callout-tip collapse="true" title="After: what to point out"}
+**Failure 1:** The AnalysisException tells you exactly which column is missing. Look at driver stderr, Spark UI SQL tab.
 
-Two intentional failures to show how to read Spark error messages and find logs:
-
-1. **Column typo** (`review_score` instead of `rating`): Spark catches this at query planning time before scanning any data. The AnalysisException tells you exactly which column is missing. Look at driver stderr, Spark UI SQL tab.
-2. **Executor OOM**: force all data to one partition with `REPARTITION(1)`, then `COLLECT_LIST` every review title per user. One executor gets everything, runs out of heap, crashes. Look at Spark UI Stages tab, executor logs.
-
-::: {.callout-tip icon="false" title="Where to find logs"}
-
-Where to find logs:
+**Failure 2:** Look at Spark UI Stages tab for the failed stage, executor logs for `OutOfMemoryError`.
 
 | What happened | Where to look |
 |---|---|
@@ -420,12 +469,12 @@ This can be a walkthrough without running the scripts.
 
 ### Show `infra/transient_step.sh`
 
-::: {.callout-tip icon="false" title="Talking points"}
-The batch pattern: submit a script, cluster starts, runs it, terminates. No SSH needed.
+::: {.callout-note collapse="true" title="Before: what we're showing"}
+The batch pattern: submit a script, cluster starts, runs it, terminates. No SSH needed. `--auto-terminate` + `--steps` = fire and forget.
+:::
 
-`--auto-terminate` + `--steps` = fire and forget. You pay only for compute time.
-
-Compare with the interactive cluster from Part 2: you pay for idle time while debugging.
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+You pay only for compute time. Compare with the interactive cluster from Part 2: you pay for idle time while debugging.
 :::
 
 ### Show `infra/batch_user_summary.py`
@@ -437,10 +486,12 @@ The DuckDB-OOM query (GROUP BY 50M users) as a standalone PySpark script that wr
 
 ### Show `infra/create_trino_cluster.sh`
 
-::: {.callout-tip icon="false" title="Talking points"}
-Third engine, same query. Trino runs **outside YARN** (its own coordinator/worker model), so it needs a dedicated cluster.
+::: {.callout-note collapse="true" title="Before: what we're showing"}
+Third engine, same query. Trino runs outside YARN (its own coordinator/worker model), so it needs a dedicated cluster.
+:::
 
-Pipeline execution: starts returning results before the full scan completes.
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+Pipeline execution: starts returning results before the full scan completes. Trino is to DuckDB what SparkSQL is to pandas: same SQL philosophy, distributed.
 :::
 
 

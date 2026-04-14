@@ -87,21 +87,42 @@ CLUSTER_ID=$(aws emr create-cluster \
 echo ""
 echo "Cluster ID: ${CLUSTER_ID}"
 echo ""
-echo "Check status (repeat until WAITING, ~8 min):"
-echo "  aws emr describe-cluster --cluster-id ${CLUSTER_ID} --query 'Cluster.Status.State' --profile ${PROFILE} --region ${REGION}"
+echo "Waiting for cluster to reach WAITING state (~8 min)..."
+aws emr wait cluster-running \
+    --cluster-id "${CLUSTER_ID}" \
+    --profile "${PROFILE}" --region "${REGION}"
+
+# --- Get the primary node private IP ---
+PRIVATE_IP=$(aws emr list-instances \
+    --cluster-id "${CLUSTER_ID}" \
+    --instance-group-types MASTER \
+    --query 'Instances[0].PrivateIpAddress' --output text \
+    --profile "${PROFILE}" --region "${REGION}")
+
+KEY_PATH="${KEY_DIR:-\$HOME/mds}/${KEY_NAME}.pem"
+
 echo ""
-echo "Get primary node private IP (once WAITING):"
-echo "  aws emr list-instances --cluster-id ${CLUSTER_ID} --instance-group-types MASTER --query 'Instances[0].PrivateIpAddress' --output text --profile ${PROFILE} --region ${REGION}"
+echo "========================================="
+echo "EMR cluster is ready"
+echo "========================================="
+echo "Cluster ID:     ${CLUSTER_ID}"
+echo "Primary node:   ${PRIVATE_IP} (private, via ProxyJump)"
 echo ""
 echo "Add to ~/.ssh/config:"
-echo "  Host emr-primary"
-echo "      HostName <private-ip>"
-echo "      User hadoop"
-echo "      IdentityFile ~/mds/${KEY_NAME}.pem"
-echo "      ProxyJump gateway"
-echo "      LocalForward 4040 localhost:4040"
-echo "      LocalForward 18080 localhost:18080"
-echo "      LocalForward 8088 localhost:8088"
+echo "    Host emr-primary"
+echo "        HostName ${PRIVATE_IP}"
+echo "        User hadoop"
+echo "        IdentityFile ${KEY_PATH}"
+echo "        ProxyJump gateway"
+echo "        LocalForward 4040 localhost:4040"
+echo "        LocalForward 18080 localhost:18080"
+echo "        LocalForward 8088 localhost:8088"
+echo ""
+echo "Then connect and run the demo:"
+echo "  ssh emr-primary"
+echo "  git clone https://github.com/ilyamusabirov/525next-steps.git"
+echo "  cd 525next-steps/demos/sql-on-cluster"
+echo "  spark-submit 03_spark_sql.py"
 echo ""
 echo "REMEMBER to terminate when done (\$0.71/hr):"
 echo "  aws emr terminate-clusters --cluster-ids ${CLUSTER_ID} --profile ${PROFILE} --region ${REGION}"
