@@ -281,10 +281,10 @@ aws s3 cp s3://dsci525-data-2026/scripts/03_spark_sql.py ~/
 ```
 :::
 
-**Step 2.** Run the Spark scripts via `spark-submit`, or open them in VS Code (connect Remote SSH to `emr-primary`).
+**Step 2.** Run the Spark scripts via `spark-submit`. Append `2>/dev/null` to suppress Spark's verbose INFO logs (they go to stderr) and see only your `print()` output.
 
 ```bash
-spark-submit 03_spark_sql.py
+spark-submit 03_spark_sql.py 2>/dev/null
 ```
 
 ### Script: `03_spark_sql.py`
@@ -339,7 +339,7 @@ Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
 ### Script: `04_spark_ml.py` (if time)
 
 ```bash
-spark-submit 04_spark_ml.py
+spark-submit 04_spark_ml.py 2>/dev/null
 ```
 
 Four steps in one pipeline:
@@ -356,7 +356,7 @@ SparkSQL for feature engineering chained with MLlib for training. Same cluster, 
 ### Script: `05_spark_fail.py`
 
 ```bash
-spark-submit 05_spark_fail.py
+spark-submit 05_spark_fail.py 2>/dev/null
 ```
 
 Two intentional failures to show how to read Spark error messages and find logs:
