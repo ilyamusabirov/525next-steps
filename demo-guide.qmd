@@ -89,6 +89,8 @@ Three settings + one credential line = full SQL on 22.5 GB of S3 parquet. No clu
 
 #### Query 1: Category summary (~4s)
 
+For each product category, count reviews and compute the average rating. Only 4 categories, so the hash table is tiny (~400 bytes). This query is bottlenecked by S3 read speed, not computation.
+
 ```python
 SELECT category, COUNT(*) AS n_reviews,
        ROUND(AVG(rating), 2) AS avg_rating
@@ -103,6 +105,8 @@ Low-cardinality GROUP BY: the hash table has **4 entries** (~400 bytes). The tim
 
 #### Query 2: Filter + sort with LIMIT (~14s)
 
+Find the 20 most-helpful reviews across all 207M rows. DuckDB does NOT sort all 49M qualifying rows: it keeps a small heap of size 20 and only inserts a row if it beats the current minimum.
+
 ```python
 SELECT asin, title, helpful_vote, rating
 FROM read_parquet('{S3}', hive_partitioning=true)
@@ -116,6 +120,8 @@ Top-k optimization: DuckDB tracks the top 20 in a **heap**, never sorts all 49M 
 :::
 
 #### Query 3: Cross-category join (~19s)
+
+How many users gave 4+ star reviews in BOTH Electronics and Books? DuckDB builds two sets of distinct user IDs (one per category), then hash-joins them. Hive partitioning means it only reads those two category folders from S3, skipping the rest entirely.
 
 ```python
 SELECT COUNT(*) AS shared_users FROM (
@@ -137,6 +143,8 @@ Hive partitioning: DuckDB only reads `Electronics/` and `Books/` partitions, ski
 ### Script: `02_duckdb_limits.py`
 
 #### GROUP BY 10M products (~52s)
+
+For each of ~10 million products, count reviews and average rating. DuckDB must build a hash table with one entry per product.
 
 ```python
 SELECT parent_asin, COUNT(*) AS n_reviews, ROUND(AVG(rating), 2) AS avg_rating
@@ -161,7 +169,7 @@ Walk through the hash table math on the board:
 
 #### GROUP BY + WINDOW (~74s)
 
-Two memory-intensive operators back to back. Still fits, but pushing the limit.
+Find the top 10 most-reviewed products in each category. This needs two expensive operators back to back: a hash table for GROUP BY, then a window buffer for ROW_NUMBER. Both compete for the same 4 GB memory budget. Still fits, but pushing the limit.
 
 #### Boundary discussion
 
@@ -218,26 +226,9 @@ aws sso login --profile ilya-ubc-aws-student
 bash infra/create_spark_cluster.sh
 ```
 
-The script auto-discovers public subnets, creates a 3-node EMR cluster (1 primary + 2 core, `m6a.xlarge`), and prints the cluster ID and status-check commands.
+The script uploads the bootstrap (installs numpy + git on all nodes), auto-discovers public subnets, creates a 3-node EMR cluster (1 primary + 2 core, `m6a.xlarge`), waits for it to reach WAITING state (~8 min), and prints the private IP and SSH config block.
 
-**Step 3.** Check status (repeat until WAITING):
-
-```bash
-aws emr describe-cluster --cluster-id j-XXXXXXXXXXXXX \
-    --query 'Cluster.Status.State' \
-    --profile ilya-ubc-aws-student --region ca-central-1
-```
-
-**Step 4.** Get the primary node private IP (we connect through the gateway, so we need the VPC-internal address):
-
-```bash
-aws emr list-instances --cluster-id j-XXXXXXXXXXXXX \
-    --instance-group-types MASTER \
-    --query 'Instances[0].PrivateIpAddress' --output text \
-    --profile ilya-ubc-aws-student --region ca-central-1
-```
-
-**Step 5.** Add the EMR primary to your `~/.ssh/config` (below the `gateway` block from earlier):
+**Step 3.** Add the EMR primary to your `~/.ssh/config` (the script prints this block, paste it):
 
 ```
 Host emr-primary
@@ -252,7 +243,7 @@ Host emr-primary
 
 The `LocalForward` lines tunnel the Spark UI (4040), History Server (18080), and YARN ResourceManager (8088) to your laptop automatically on connect.
 
-**Step 6.** Verify the connection:
+**Step 4.** Verify the connection:
 
 ```bash
 ssh emr-primary
@@ -265,11 +256,10 @@ Use this time to show the [infrastructure overview diagram](infra.qmd#architectu
 
 ## Part 2: SparkSQL on EMR (~20 min) {#part2}
 
-**Step 1.** Install git, clone the repo on the EMR primary node:
+**Step 1.** Clone the repo on the EMR primary node (git is installed by the bootstrap action):
 
 ```bash
 ssh emr-primary
-sudo yum install -y git
 git clone https://github.com/ilyamusabirov/525next-steps.git
 cd 525next-steps/demos/sql-on-cluster
 ```
@@ -301,11 +291,15 @@ spark-submit 03_spark_sql.py
 
 #### Category summary: Spark ~7s vs DuckDB ~4s
 
+Same query as DuckDB Query 1: count reviews per category. Only 4 groups, so the distributed shuffle is overkill here.
+
 ::: {.callout-tip icon="false" title="Talking points"}
 Spark is **slower** here. Cluster overhead: YARN job scheduling, task serialization, shuffle coordination. For a trivial 4-group aggregation, this overhead dominates. DuckDB runs in-process with no coordination.
 :::
 
 #### GROUP BY 10M products: Spark ~32s vs DuckDB ~52s
+
+Same 10M-product aggregation. The hash table is distributed across executors, each holding a slice. 8 executor cores read S3 in parallel vs DuckDB's 4 threads on one machine.
 
 ::: {.callout-tip icon="false" title="Talking points"}
 Spark is **faster** here. 8 executor cores (2 core nodes x 4 vCPU) read S3 in parallel, compared to DuckDB's 4 threads on one machine. SparkSQL also has more total memory (~20 GB across executors vs 4 GB).
@@ -313,14 +307,16 @@ Spark is **faster** here. 8 executor cores (2 core nodes x 4 vCPU) read S3 in pa
 
 #### GROUP BY + WINDOW: Spark ~27s vs DuckDB ~74s
 
-2.7x faster. Distributed memory and parallelism win on complex queries.
+Top 10 most-reviewed products per category. Two expensive operators: GROUP BY builds a distributed hash table, then ROW_NUMBER() runs a window sort on each category partition. 2.7x faster: distributed memory and parallelism win on complex queries.
 
 #### GROUP BY 50M users: the query DuckDB couldn't do
 
-::: {.callout-important icon="false" title="This is the punchline"}
-SparkSQL completes this query. The hash table is distributed across executors, each in its own JVM heap. Combined memory: ~20 GB vs DuckDB's 4-12 GB.
+~50M unique users. DuckDB OOM'd because the hash table (~5 GB) exceeded its 4 GB memory limit. Spark distributes the hash table across executors, each with its own JVM heap. Combined memory: ~20 GB.
 
-**While this runs**: open Spark UI at `http://localhost:4040` (VS Code auto-forwards the port).
+::: {.callout-important icon="false" title="This is the punchline"}
+SparkSQL completes this query.
+
+**While this runs**: open Spark UI at `http://localhost:4040` (tunneled via LocalForward in SSH config).
 
 - Show the **Stages** tab: active stage, task distribution across executors
 - Show the **SQL** tab: physical plan with shuffle operators
@@ -346,6 +342,13 @@ Cost: DuckDB on t3a.xlarge = \$0.15/hr. SparkSQL on 3-node EMR = \$0.71/hr.
 spark-submit 04_spark_ml.py
 ```
 
+Four steps in one pipeline:
+
+1. **Feature engineering** (SparkSQL): aggregate 207M reviews into product-level features (review count, avg rating, rating spread, helpfulness, verified ratio, text length). Only products with 10+ reviews since 2020.
+2. **Vector assembly** (MLlib): pack numeric columns into a single feature vector.
+3. **Train** a Random Forest to predict avg_rating from product features. Training is distributed: each tree is built on a different executor.
+4. **Evaluate**: RMSE on held-out test set, plus feature importances.
+
 ::: {.callout-tip icon="false" title="Talking points"}
 SparkSQL for feature engineering chained with MLlib for training. Same cluster, same session, no intermediate files. This is the Spark differentiator: SQL + ML in one pipeline.
 :::
@@ -355,6 +358,11 @@ SparkSQL for feature engineering chained with MLlib for training. Same cluster, 
 ```bash
 spark-submit 05_spark_fail.py
 ```
+
+Two intentional failures to show how to read Spark error messages and find logs:
+
+1. **Column typo** (`review_score` instead of `rating`): Spark catches this at query planning time before scanning any data. The AnalysisException tells you exactly which column is missing.
+2. **Executor OOM**: force all data to one partition with `REPARTITION(1)`, then `COLLECT_LIST` every review title per user. One executor gets everything, runs out of heap, crashes.
 
 ::: {.callout-tip icon="false" title="Talking points"}
 Two intentional failures:
