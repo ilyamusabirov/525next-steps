@@ -603,19 +603,17 @@ columns:
 SELECT * FROM read_parquet('data/*.parquet')   -- reads ALL files in data/
 ```
 
-**What does `materialization: type: table` actually do?** Bruin wraps your SELECT in `CREATE TABLE raw_reviews AS ...` and runs it against the DuckDB database file (`food.db` on disk). DuckDB opens each parquet file, decompresses the row groups, converts the data into its own internal columnar format, and writes the result into `food.db`. After this step, `food.db` contains a real table called `raw_reviews`. The next asset (`monthly_summary`) queries that table, not the parquet files.
+**What does `materialization: type: table` do?** Bruin wraps your SELECT in `CREATE TABLE raw_reviews AS ...` and runs it against the DuckDB database file (`food.db` on disk). DuckDB reads each parquet file, decompresses the row groups, and writes the result into `food.db` in its own columnar format. After this, `food.db` contains a table called `raw_reviews`. The next asset queries that table, not the parquet files.
 
-This is **eager**: read everything now, store the result. The alternative is `type: view` (lazy): Bruin runs `CREATE VIEW raw_reviews AS ...`, which saves only the query text. No data is read or stored until a downstream asset queries the view.
+**Table = eager, View = lazy.** `type: table` reads and stores everything now. `type: view` saves only the query text (`CREATE VIEW ...`). No data is read until a downstream asset queries the view.
 
-**Two boundaries, two different costs.** Suppose `raw_reviews` is a view and the next asset is a Python script that reads it into polars:
+A view re-reads parquet on every query. That read has two boundaries, each with a different cost:
 
-1. **Parquet → DuckDB** (the view executes): DuckDB opens each parquet file, decompresses the row groups, converts data into its internal columnar vectors. This is real I/O and CPU work. Not zero-copy. Happens every time any asset queries the view.
+1. **Parquet → DuckDB** (view executes): DuckDB decompresses row groups and converts them into its internal vectors. Real I/O and CPU work, every time. Not zero-copy.
 
-2. **DuckDB → polars/pandas** (the Python asset receives results): DuckDB exports its result as Arrow arrays. Polars uses Arrow memory natively, so this handoff is essentially zero-copy: polars wraps the Arrow buffers without copying them. For pandas, numeric columns can be zero-copy with Arrow-backed dtypes, but string columns get copied (Arrow uses UTF-8 buffers, pandas default uses Python objects).
+2. **DuckDB → polars/pandas** (Python asset receives results): DuckDB exports its vectors as Arrow arrays. Polars uses Arrow memory natively, so it wraps the buffers directly: zero-copy. Pandas copies string columns (Arrow stores UTF-8, pandas uses Python objects) but can receive numeric columns zero-copy with `pd.ArrowDtype`.
 
-Even if boundary #2 is zero-copy, **you still pay the full parquet decompression cost at boundary #1** every time the view runs. Zero-copy at the output does not save you from re-reading the input.
-
-For a pipeline, the table materialization makes sense: pay the parquet read cost once in `raw_reviews`, then every downstream asset queries the fast on-disk DuckDB table instead of re-reading and re-decompressing parquet.
+Zero-copy at boundary 2 does not eliminate the decompression cost at boundary 1. A table pays boundary 1 once. Every downstream asset reads from `food.db` (already in DuckDB format) instead of re-decompressing parquet.
 
 Then `assets/monthly_summary.sql` (the incremental part):
 
