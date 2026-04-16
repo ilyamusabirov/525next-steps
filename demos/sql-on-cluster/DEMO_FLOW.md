@@ -42,12 +42,12 @@ Optional:
 | GROUP BY 10M products | Hash table: 10M entries x 100 bytes = ~1 GB. Fits in 4 GB. ~52s. |
 | GROUP BY + WINDOW | Two operators back to back. ~74s. Pushing the limit. |
 | **Boundary discussion** | Walk through the math: 50M users x 100 bytes = 5 GB. Won't fit. |
-| **OOM on user_id** | Let it fail. Read the error message. |
-| Rescue attempt | 1 thread + 12 GB. May work (slower) or may still fail. |
+| **OOM on user_id** | Disable spill-to-disk first. Let it fail at 4 GB. Read the error. |
+| Rescue: 12 GB + spill | Re-enable spill, 12 GB, 4 threads. Succeeds in ~61s. Uses 75% of machine. |
 
-**Key message:** The limit is not data size but intermediate structure size (hash table cardinality).
+**Key message:** The limit is not data size but intermediate structure size. DuckDB CAN handle it by scaling up, but hits three walls: memory ceiling, CPU bound, network throughput.
 
-**Transition:** "Same SQL, same data. We just need more machines."
+**Transition:** "DuckDB finishes, but the machine is near its limits. Same SQL, same data: let's distribute the work."
 
 ---
 
@@ -62,7 +62,7 @@ Optional:
 | Category summary | Spark overhead: ~7s vs DuckDB's ~4s. Shuffle cost for a trivial query. |
 | GROUP BY 10M products | ~32s vs 52s. Distributed hash table wins. |
 | GROUP BY + WINDOW | ~27s vs 74s. 2.7x faster. |
-| **GROUP BY 50M users** | **This is the query DuckDB couldn't do.** Runs on Spark. |
+| **GROUP BY 50M users** | DuckDB did it in 61s at 75% RAM. Spark: ~32s across 3 nodes, with headroom. |
 | Comparison table | Side by side. DuckDB wins small queries, Spark wins large ones. |
 
 **While queries run:** Open Spark UI (port 4040, VS Code auto-forwards it)
@@ -101,6 +101,32 @@ Optional:
 - Interactive cluster: SSH in, run notebooks, develop
 - Long-running: you pay for idle time
 - Transient: pay only for compute
+
+---
+
+## Part 4: Bruin pipeline (~10 min)
+
+### cd into `../bruin-pipeline/` and open `run_demo.sh`
+
+Three runs that build on each other. The script has TALK THROUGH
+and EXPECT blocks for each step. File edits are done in VS Code.
+
+| Run | What happens |
+|-----|-------------|
+| Run 1: full pipeline | 3 assets execute in DAG order, all quality checks pass, query result |
+| Run 2: break a check | Remove grade 'e' from accepted_values. Check fails, downstream blocked |
+| Run 3: fix + update | Restore 'e', add max_sugar column. Clean result with new column |
+
+**Key messages:**
+
+1. **DAG resolution**: Bruin reads `depends:` and runs assets in the right order
+2. **Quality gates**: checks run after each asset. Failure stops downstream assets.
+3. **Error propagation prevention**: bad data caught at the source, not 3 steps later
+4. **Full refresh**: every `bruin run` re-executes everything from scratch
+5. **bruin query**: reads existing tables without re-running the pipeline
+
+**Transition:** "This is what happens when your one-time scripts become recurring.
+A pipeline tool handles ordering, validation, and failure propagation for you."
 
 ---
 

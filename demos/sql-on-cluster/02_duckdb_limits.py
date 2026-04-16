@@ -95,15 +95,14 @@ result
 # 4 slices x 12.5M x 100 bytes = ~5 GB just for the hash table.
 # On top of that, DuckDB needs memory for S3 read buffers,
 # parquet decompression, and the ORDER BY sort buffer.
-# Total: well over 4 GB. This will not fit.
+# Total: well over 4 GB.
 #
-# **This will OOM.** Let's try it.
+# **What happens?** It depends on whether DuckDB can spill to disk.
 
-# %% INTENTIONAL FAILURE: GROUP BY user_id (~50M unique users)
-# Disable spill-to-disk so the hash table must fit entirely in RAM.
-# Without this, DuckDB would silently spill the overflow to /tmp/duckdb
-# and succeed (slowly). We want to isolate the memory limit.
-conn.execute("SET temp_directory = '';")
+# %% DEMO: what happens if we disable spill-to-disk?
+# If we turn off the opportunity to store overflow on disk,
+# DuckDB must fit the entire hash table in RAM. At 4 GB it cannot.
+conn.execute("SET temp_directory = '';")    # disable spill-to-disk
 print("Attempting GROUP BY on ~50M unique user IDs...")
 print("memory_limit = 4GB, threads = 4, spill-to-disk = OFF")
 print()
@@ -125,30 +124,23 @@ except Exception as e:
     print()
     print("Why:")
     print("  ~50M unique users x ~100 bytes/entry = ~5 GB hash table")
-    print("  With 4 threads: 4 partitions x 12.5M entries x 100 B = ~5 GB")
-    print("  Plus S3 buffers, decompression, sort buffer -> well over 4 GB")
     print("  memory_limit = 4 GB, spill disabled -> does not fit")
 
 # %% [markdown]
-# ## What are our options?
+# ## Scaling up: more memory + spill-to-disk
 #
-# | Option | Tradeoff |
-# |--------|----------|
-# | Enable spill-to-disk | Hash table overflows to EBS; slower but works if disk is big enough |
-# | Reduce threads to 1 | Fewer hash table partitions, but much slower |
-# | Increase memory_limit to 12 GB | Uses most of our 16 GB machine |
-# | Use SparkSQL on EMR | Distributes hash table across nodes |
+# DuckDB **can** handle this on one machine. Re-enable spill-to-disk
+# and give it more memory so the hash table fits mostly in RAM
+# (overflow pages go to disk via spill).
 #
-# Let's try option 1 first: rescue with fewer threads + spill-to-disk.
+# Our t3a.xlarge has 16 GB total. Setting memory_limit to 12 GB
+# leaves ~4 GB for the OS, Python, and S3 read buffers.
 
-# %% Rescue attempt: 1 thread, 12 GB
-# Re-enable spill-to-disk for a fair retry.
-# Fewer threads = fewer hash table partitions = less memory duplication.
-# But single-threaded is much slower than 4 threads.
-conn.execute("SET temp_directory = '/tmp/duckdb';")
-conn.execute("SET threads = 1;")
+# %% Rescue: 12 GB, 4 threads, spill-to-disk ON
+conn.execute("SET temp_directory = '/tmp/duckdb';")   # re-enable spill
 conn.execute("SET memory_limit = '12GB';")
-print("Retrying: threads=1, memory_limit=12GB, spill-to-disk = ON")
+# Keep threads = 4 (the honest config for this machine).
+print("Retrying: threads=4, memory_limit=12GB, spill-to-disk = ON")
 t0 = time.time()
 try:
     result = conn.execute(f"""
@@ -160,12 +152,11 @@ try:
         ORDER BY n_reviews DESC
         LIMIT 20
     """).df()
-    print(f"Succeeded in {time.time()-t0:.0f}s (vs ~52s for 10M groups at 4 threads)")
+    print(f"Succeeded in {time.time()-t0:.0f}s (vs ~52s for 10M groups)")
+    print("It works, but uses 75% of this machine's RAM for one query.")
     result
 except Exception as e:
     print(f"Still OOM: {e}")
-    print("Even 12 GB with 1 thread is not enough for 50M groups.")
-    print("-> This is where SparkSQL earns its keep.")
 
 # %% [markdown]
 # ## Takeaway
@@ -174,20 +165,24 @@ except Exception as e:
 # The limit is not data size but **intermediate structure size**:
 #
 # - 4 categories (GROUP BY category): hash table ~400 bytes -> trivial
-# - 10M products (GROUP BY parent_asin): hash table ~1 GB -> fits in RAM
-# - 50M users (GROUP BY user_id): hash table ~5 GB -> exceeds 4 GB RAM
+# - 10M products (GROUP BY parent_asin): hash table ~1 GB -> fits in 4 GB
+# - 50M users (GROUP BY user_id): hash table ~5 GB -> needs 12 GB + spill
 #
-# DuckDB **can** finish the 50M-user query on one machine: enable
-# spill-to-disk, give it more memory, reduce threads. It works,
-# but you're consuming most of the machine and running much slower.
-# The tradeoff is cost and speed, not capability.
+# Scaling up (more RAM, spill-to-disk) works, but has limits:
+#
+# - **Memory ceiling**: we're using 75% of this machine for one query.
+#   A bigger hash table (100M+ keys, or wider aggregates) may not fit
+#   even with all 16 GB.
+# - **CPU bound**: only the CPUs on this one machine. 4 threads on a
+#   t3a.xlarge is all we get. A second machine's CPUs cannot help.
+# - **Network throughput**: one machine's NIC reads all 22.5 GB from S3.
 #
 # | Approach | 50M-user GROUP BY | Tradeoff |
 # |----------|-------------------|----------|
 # | DuckDB 4 GB, no spill | OOM | - |
-# | DuckDB 12 GB, 1 thread, spill | Succeeds (slow) | Uses most of 16 GB machine, single-threaded |
-# | SparkSQL 3-node cluster | Succeeds (fast) | Costs $0.71/hr vs $0.15/hr |
+# | DuckDB 12 GB, 4 threads, spill | ~61s | Uses 75% of a 16 GB machine |
+# | SparkSQL 3-node cluster | ~32s | Costs $0.71/hr vs $0.15/hr |
 #
-# SparkSQL distributes the hash table across nodes: more total memory,
-# more parallelism, and the machine is not pegged at its limits.
-# Same SQL, different engine.
+# SparkSQL distributes the hash table across 3 nodes: more total
+# memory, more CPUs reading from S3 in parallel, and no single
+# machine is pegged at its limits. Same SQL, different engine.

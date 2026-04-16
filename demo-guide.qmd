@@ -1,5 +1,5 @@
 ---
-title: "Live Demo: SQL on the Cluster"
+title: "Live Demo Guide"
 subtitle: "Step-by-step instructor guide with timing, talking points, and code"
 ---
 
@@ -237,32 +237,38 @@ With 4 thread-local partitions:
   4 threads x 1.25 GB = 5 GB minimum -> exceeds 4 GB limit
 ```
 
-**Prediction**: this will OOM. Let them say it before you run it.
+**Prediction**: at 4 GB with no spill, this will OOM. Let them say it before you run it.
 :::
 
-#### Intentional OOM
+#### What if we disable spill-to-disk?
 
-::: {.callout-note icon="false" title="Why we disable spill-to-disk"}
-The cell disables `temp_directory` before running the query. Without this, DuckDB silently spills the hash table overflow to disk and the query succeeds (slowly). Disabling it isolates the memory limit so the OOM is visible.
+::: {.callout-note icon="false" title="Why we disable spill-to-disk first"}
+The cell disables `temp_directory` before running the query. This forces DuckDB to fit the entire hash table in RAM. At 4 GB it cannot. Without this line, DuckDB would spill to disk and succeed (we show that next).
 :::
 
-Run the cell. Let it fail. Read the error message together.
+Run the cell. Let it fail. Read the error message together: "~50M unique users x ~100 bytes = ~5 GB hash table, memory_limit = 4 GB, spill disabled."
 
-#### Rescue attempt: 1 thread, 12 GB
+#### Rescue: 12 GB, 4 threads, spill-to-disk
 
 ::: {.callout-note collapse="true" title="Before: what we're trying"}
-Re-enable spill-to-disk, drop to 1 thread, raise memory to 12 GB. Fewer threads = fewer hash table partitions = less memory duplication. The tradeoff: much slower.
+Re-enable spill-to-disk and raise memory to 12 GB (75% of the 16 GB machine). Keep 4 threads: this is the honest config for this instance.
 :::
 
 ```python
-conn.execute("SET threads = 1;")
+conn.execute("SET temp_directory = '/tmp/duckdb';")   # re-enable spill
 conn.execute("SET memory_limit = '12GB';")
 ```
 
 ::: {.callout-tip collapse="true" title="After: results and performance"}
-DuckDB can finish, but it consumes most of the machine's 16 GB and runs single-threaded. Not a real solution for production.
+Succeeds in ~61 seconds. DuckDB CAN handle 50M groups on one machine, but uses 75% of available RAM for one query.
 
-**Transition:** "DuckDB can be rescued on one machine, but you're fighting the hardware limits. Same SQL, same data: let's see what happens when we distribute the work."
+**Three walls of scaling up:**
+
+- **Memory ceiling**: 75% of this machine for one query. A bigger hash table may not fit even with 16 GB.
+- **CPU bound**: 4 threads on a t3a.xlarge. A second machine's CPUs cannot help.
+- **Network throughput**: one machine's NIC reads all 22.5 GB from S3.
+
+**Transition:** "DuckDB finishes, but the machine is near its limits. Same SQL, same data: let's distribute the work across a cluster."
 :::
 
 ::: {.callout-note collapse="true" title="Scale up vs scale out: when does a cluster beat a bigger machine?"}
@@ -439,16 +445,16 @@ Same DISTINCT + JOIN query. Spark builds two distributed DISTINCT sets, then has
 Nearly identical (~13s vs ~14s). Both engines handle this well; the join itself is small.
 :::
 
-#### GROUP BY 50M users: the query DuckDB couldn't do
+#### GROUP BY 50M users: where the cluster earns its keep
 
 ::: {.callout-note collapse="true" title="Before: what we're doing"}
-~50M unique users. DuckDB OOM'd because the hash table (~5 GB) exceeded its 4 GB memory limit. Spark distributes the hash table across executors, each with its own JVM heap. Combined memory: ~20 GB.
+~50M unique users. DuckDB handled this at 12 GB + spill in ~61 seconds, but it used 75% of the machine's RAM for one query. Spark distributes the hash table across executors: more total memory, more CPUs reading S3 in parallel, and no single machine near its limits.
 
 **While this runs**: open Spark UI at `http://localhost:4040` (tunneled via LocalForward in SSH config).
 :::
 
 ::: {.callout-tip collapse="true" title="After: results and performance"}
-SparkSQL completes this query at full parallelism, without consuming all available memory on one machine.
+~32 seconds. Spark distributes the hash table across 3 nodes. Compare: DuckDB needed 61s and 75% of a 16 GB machine. Spark uses ~20 GB total across executors, with headroom to spare.
 
 In the Spark UI:
 
@@ -466,11 +472,11 @@ In the Spark UI:
 | Cross-category join | ~14s | ~13s | ~13s |
 | GROUP BY 10M products | ~44s | ~31s | ~32s |
 | GROUP BY + WINDOW | ~62s | ~22s | ~27s |
-| GROUP BY 50M users | ~80s (spilling) | ~52s | runs |
+| GROUP BY 50M users | OOM (no spill) | ~61s | ~32s |
 
 Both DuckDB columns run on **1 machine, 4 vCPU**. Spark has **8 effective cores across 3 network connections**. Two confounds: memory and I/O parallelism. The "4 GB, low-resource" column is intentionally constrained: heavier queries spill to disk, making DuckDB look slower than it is. At 12 GB (default on a 16 GB machine), DuckDB matches or beats Spark on compute-heavy queries. Spark still wins on scan-heavy queries (category summary) thanks to 3x network throughput.
 
-The 50M-user GROUP BY works fine at 12 GB. The OOM in the demo happens only when we also disable spill-to-disk.
+The 50M-user GROUP BY works at 12 GB with spill (~61s). The OOM in the demo happens only when we disable spill-to-disk to isolate the memory limit.
 
 Cost: DuckDB on t3a.xlarge (4 vCPU, 16 GB) = \$0.15/hr. SparkSQL on 3-node EMR (12 vCPU, 48 GB) = \$0.71/hr. See the "Scale up vs scale out" callout above for the full analysis.
 
@@ -552,6 +558,194 @@ Pipeline execution: starts returning results before the full scan completes. Tri
 :::
 
 
+## Part 4: Bruin pipeline (~10 min) {#part4}
+
+::: {.callout-note collapse="true" title="Before: framing for students"}
+"We just saw SQL engines of increasing power: DuckDB on one machine, SparkSQL on a cluster. But in practice, you don't run queries by hand every day. You build **pipelines**: sequences of steps with dependencies, quality checks, and incremental updates. Let's see what that looks like."
+
+This runs on your **laptop** (no cloud needed). Source data is local parquet files.
+:::
+
+### Prerequisites
+
+```bash
+curl -LsSf https://getbruin.com/install/cli | sh    # Bruin CLI
+# uv already installed (for generating test data)
+```
+
+### Show the pipeline structure
+
+Open `demos/bruin-pipeline/` in VS Code. Walk through:
+
+| File | What it does |
+|---|---|
+| `pipeline.yml` | Pipeline name (`review_analytics`), default DuckDB connection |
+| `assets/raw_reviews.sql` | Ingest: reads ALL parquet in `data/*.parquet` (full refresh) |
+| `assets/monthly_summary.sql` | Transform: GROUP BY month, **incremental** (`delete+insert`) |
+| `data/` | Source parquet files (simulates S3 data drops) |
+
+::: {.callout-important icon="false" title="Walk through the @bruin headers"}
+Open `assets/raw_reviews.sql`:
+
+```sql
+/* @bruin
+name: raw_reviews                   -- asset name
+type: duckdb.sql                    -- SQL on DuckDB connection
+materialization:
+    type: table                     -- full refresh: CREATE OR REPLACE TABLE
+columns:
+  - name: rating
+    checks:
+      - name: accepted_values       -- rating must be 1-5
+        value: [1, 2, 3, 4, 5]
+@bruin */
+
+SELECT * FROM read_parquet('data/*.parquet')   -- reads ALL files in data/
+```
+
+Then `assets/monthly_summary.sql` (the incremental part):
+
+```sql
+/* @bruin
+name: monthly_summary
+type: duckdb.sql
+materialization:
+    type: table
+    strategy: delete+insert         -- INCREMENTAL: only touch months in the result
+    incremental_key: review_month   -- Bruin deletes+inserts by this column
+depends:
+  - raw_reviews                     -- runs after raw_reviews
+@bruin */
+
+SELECT
+    DATE_TRUNC('month', review_date)::DATE AS review_month,
+    COUNT(*) AS n_reviews, ...
+FROM raw_reviews
+WHERE review_date >= '{{ start_date }}'::DATE    -- template: filled by --start-date
+  AND review_date <  '{{ end_date }}'::DATE      -- template: filled by --end-date
+GROUP BY review_month
+```
+
+"The `delete+insert` strategy: Bruin runs the query, sees which months are in the result, DELETEs those months from the existing table, then INSERTs the new rows. Months outside the date range are untouched."
+:::
+
+### Setup: generate source data
+
+```bash
+cd demos/bruin-pipeline
+rm -f food.db data/*.parquet
+uv run python generate_data.py --h1
+```
+
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+Creates `data/reviews_2022_h1.parquet`: ~1080 synthetic reviews for Jan-Jun 2022. This simulates the initial data drop. H2 does not exist yet.
+:::
+
+### Run 1: initial load (Jan-Jun 2022)
+
+```bash
+bruin run --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.yml
+```
+
+::: {.callout-note collapse="true" title="What --full-refresh does"}
+`--full-refresh` forces `create+replace` on the first run, creating the tables from scratch. Subsequent runs use the declared strategy (`delete+insert` for `monthly_summary`). The `--start-date` and `--end-date` flags fill the `{{ start_date }}` and `{{ end_date }}` template variables in the SQL.
+:::
+
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+- `raw_reviews`: loaded 1080 reviews from H1 parquet
+- `monthly_summary`: computed 6 rows (Jan-Jun)
+- All quality checks pass
+- **Note the exact values for Jan-Jun. We'll verify they don't change after Run 2.**
+:::
+
+### Query: 6 months
+
+```bash
+bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+```
+
+**Expected:** 6 rows (Jan-Jun 2022), each with `n_reviews`, `avg_rating`, `unique_users`, `unique_products`.
+
+### New data arrives
+
+"The data team delivers the second half of 2022. A new parquet file appears."
+
+```bash
+uv run python generate_data.py       # generates BOTH H1 and H2
+ls -lh data/                          # two files now
+```
+
+### Run 2: incremental update (Jul-Dec 2022)
+
+```bash
+bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+```
+
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+**What happened:**
+
+1. `raw_reviews` re-read ALL parquet files (both H1 + H2 = 2000 reviews). It is `create+replace`: always a full refresh of the source.
+2. `monthly_summary` only processed Jul-Dec because the `WHERE` clause uses `{{ start_date }}` = 2022-07-01 and `{{ end_date }}` = 2023-01-01.
+3. `delete+insert`: Bruin got the months from the result (Jul-Dec), deleted those from the target (nothing to delete, they didn't exist), inserted 6 new rows.
+4. **Jan-Jun rows are untouched.** Same values as Run 1.
+
+"Imagine this is 500M reviews, not 2000. Full refresh of the summary reprocesses all 500M rows every day. With `delete+insert`, yesterday's run processes only yesterday's data: same result, fraction of the compute."
+:::
+
+### Verify: 12 months, Jan-Jun untouched
+
+```bash
+bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+```
+
+**Expected:** 12 rows. Jan-Jun values **identical** to Run 1. Jul-Dec are new.
+
+### Run 3 (optional): break a quality check
+
+::: {.callout-important icon="false" title="Edit in VS Code"}
+Open `assets/raw_reviews.sql`. In `accepted_values` for rating, remove `5`:
+
+```yaml
+# BEFORE: [1, 2, 3, 4, 5]
+# AFTER:  [1, 2, 3, 4]
+```
+
+"Someone thinks 5-star reviews are suspicious and tightens the check. But the data has legitimate 5-star reviews."
+:::
+
+```bash
+bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+```
+
+::: {.callout-tip collapse="true" title="After: what to highlight"}
+- `raw_reviews` SQL succeeds (table created)
+- `accepted_values` check **FAILS**: reviews with rating=5 are rejected
+- `monthly_summary`: **UPSTREAM FAILED** (never runs)
+
+"The quality gate caught the problem before it reached the summary."
+:::
+
+### Restore original files
+
+```bash
+git checkout demos/bruin-pipeline/assets/
+rm -f demos/bruin-pipeline/food.db demos/bruin-pipeline/data/*.parquet
+```
+
+::: {.callout-note collapse="true" title="Transition to wrap-up"}
+"Three things a pipeline tool gives you:
+
+| | Folder of scripts | Bruin pipeline |
+|---|---|---|
+| Ordering | You remember the sequence | `depends:` declarations, automatic DAG |
+| Incremental | Reprocess everything every time | `delete+insert`: only the new slice |
+| Failures | Script 2 runs on bad data | Quality check blocks downstream |
+
+These are the same concepts in Airflow, dbt, Dagster, and every other pipeline tool. Bruin is the simplest one to try locally."
+:::
+
+---
+
 ## Clean up
 
 **Terminate everything when done.** Both `create_gateway.sh` and `create_spark_cluster.sh` print the exact termination commands at the end. Copy-paste them:
@@ -572,7 +766,7 @@ EC2 t3a.xlarge: \$4.08/day. EMR 3-node: \$17.04/day.
 
 ## Script index
 
-All scripts live in `demos/sql-on-cluster/`:
+SQL scripts live in `demos/sql-on-cluster/`, Bruin pipeline in `demos/bruin-pipeline/`:
 
 | Script | Engine | What it shows | Run on |
 |---|---|---|---|
@@ -582,5 +776,6 @@ All scripts live in `demos/sql-on-cluster/`:
 | [`04_spark_ml.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/04_spark_ml.py) | SparkSQL + MLlib | Feature engineering + model training | EMR primary |
 | [`05_spark_fail.py`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/05_spark_fail.py) | SparkSQL | Intentional failures, log reading | EMR primary |
 | [`setup.sh`](https://github.com/ilyamusabirov/525next-steps/blob/main/demos/sql-on-cluster/setup.sh) | -- | Install uv, register kernel, create spill dir | EC2 gateway |
+| [`bruin-pipeline/`](https://github.com/ilyamusabirov/525next-steps/tree/main/demos/bruin-pipeline) | Bruin + DuckDB | Pipeline DAG, quality checks, 3 runs | Laptop (local) |
 
-**Textbook chapters**: [SQL on the Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4c_sql_on_cluster.html), [Observing Your Spark Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4a_spark_debugging.html)
+**Textbook chapters**: [SQL on the Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4c_sql_on_cluster.html), [Data Pipelines with Bruin](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4_pipelines.html), [Observing Your Spark Cluster](https://pages.github.ubc.ca/mds-2025-26/DSCI_525_web-cloud-comp_book/lectures/w4a_spark_debugging.html)
