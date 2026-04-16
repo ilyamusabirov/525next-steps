@@ -629,6 +629,45 @@ GROUP BY review_month
 "The `delete+insert` strategy: Bruin runs the query, sees which months are in the result, DELETEs those months from the existing table, then INSERTs the new rows. Months outside the date range are untouched."
 :::
 
+::: {.callout-note collapse="true" title="Why template variables instead of hardcoded dates?"}
+The SQL never mentions a specific date. It says:
+
+```sql
+WHERE review_date >= '{{ start_date }}'::DATE
+  AND review_date <  '{{ end_date }}'::DATE
+```
+
+Today we fill these manually with `--start-date` and `--end-date` on the CLI. In production, you add a schedule to the pipeline:
+
+```yaml
+# pipeline.yml
+name: review_analytics
+schedule: "daily"
+```
+
+Now Bruin runs the pipeline every day and **fills the variables automatically**: `{{ start_date }}` becomes yesterday at midnight, `{{ end_date }}` becomes today at midnight. You never touch the SQL.
+
+**Why this matters:**
+
+1. **Replay a failed day.** The server crashed on Tuesday. On Friday you fix it and run:
+
+    ```bash
+    bruin run --start-date 2026-04-14 --end-date 2026-04-15
+    ```
+
+    Bruin injects Tuesday's window. The `delete+insert` strategy removes Tuesday's stale rows and replaces them with correct ones. Wednesday through Friday are untouched. No manual SQL edits, no risk of processing the wrong window.
+
+2. **Change granularity without changing SQL.** Your team wants hourly summaries instead of daily. Change one line in the YAML:
+
+    ```yaml
+    schedule: "hourly"
+    ```
+
+    Bruin now calculates `{{ start_date }}` and `{{ end_date }}` as a 1-hour window instead of 24 hours. The SQL is identical. The `delete+insert` strategy still works: it deletes and re-inserts only the rows that fall in that hour.
+
+The pattern: **SQL describes *what* to compute, the pipeline config describes *when* and *how often*.** Separating the two means you can backfill, change schedules, or reprocess a specific window without editing a single query.
+:::
+
 ### Setup: generate source data
 
 ```bash
