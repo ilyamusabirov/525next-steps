@@ -20,14 +20,11 @@ columns:
 
 @bruin */
 
--- Full refresh: always reads ALL parquet files in data/.
--- When new files appear in data/, this asset picks them up on next run.
+-- Full refresh: reads ALL parquet files in data/.
+-- When new files appear, this asset picks them up on next run.
+--
+-- To read from S3 instead of local files, replace the path:
+--   read_parquet('s3://dsci525-data-2026/bruin-demo/*.parquet')
+-- DuckDB picks up instance-profile credentials automatically.
 SELECT *
 FROM read_parquet('data/*.parquet')
-
--- To read directly from S3 instead of local files:
---   SELECT *
---   FROM read_parquet('s3://dsci525-data-2026/bruin-demo/*.parquet')
--- DuckDB picks up credentials from the instance profile automatically.
--- We use local files here so we can simulate "new data arrives"
--- by adding a parquet file between pipeline runs.

@@ -72,7 +72,7 @@ ls -lh data/
 
 echo ""
 echo "=== RUN 1: Initial load (Jan-Jun 2022) ==="
-bruin run --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.yml
+bruin run --config-file .bruin.yml --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.yml
 
 # ============================================================
 # QUERY: 6 months of summaries
@@ -82,7 +82,7 @@ bruin run --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.
 
 echo ""
 echo "=== Monthly summary after Run 1 ==="
-bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
 
 # ============================================================
 # NEW DATA ARRIVES: add H2 parquet
@@ -114,7 +114,7 @@ ls -lh data/
 
 echo ""
 echo "=== RUN 2: Incremental update (Jul-Dec 2022) ==="
-bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+bruin run --config-file .bruin.yml --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 
 # ============================================================
 # VERIFY: 12 months, Jan-Jun untouched
@@ -130,7 +130,7 @@ bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 
 echo ""
 echo "=== Monthly summary after Run 2 (all 12 months) ==="
-bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
 
 # ============================================================
 # PAUSE: why this matters
@@ -160,7 +160,7 @@ bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY revie
 #  the summary. In a folder-of-scripts world, the summary would
 #  silently compute on bad data."
 
-# bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+# bruin run --config-file .bruin.yml --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 
 # ============================================================
 # CLEANUP (after demo)
