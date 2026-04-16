@@ -1,0 +1,33 @@
+@startuml diagram-bruin-run3-fail
+scale 1.5
+skinparam defaultFontSize 11
+skinparam ActivityBackgroundColor #e3f2fd
+skinparam ActivityBorderColor #1565c0
+
+title Run 3: What Happens When a Quality Check Fails?
+
+start
+:We edit raw_reviews.sql:\nremove **5** from accepted_values\nso the check becomes [1, 2, 3, 4];
+
+:**raw_reviews**\nTable created successfully\n(the SQL itself ran fine);
+note right
+  **Quality checks**
+  rating: not_null  ✓
+  rating: accepted_values [1,2,3,4]  **FAIL**
+  //reviews with rating=5 exist//
+  //but 5 is no longer in the list//
+  review_date: not_null  ✓
+end note
+
+:**monthly_summary: UPSTREAM FAILED**\nBruin refuses to run it\nbecause raw_reviews failed a check;
+note right
+  The quality gate caught a problem
+  **before** it reached the summary.
+
+  In a folder-of-scripts world,
+  the summary would silently
+  compute on bad data.
+end note
+stop
+
+@enduml

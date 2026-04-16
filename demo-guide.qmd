@@ -643,8 +643,10 @@ Creates `data/reviews_2022_h1.parquet`: ~1080 synthetic reviews for Jan-Jun 2022
 
 ### Run 1: initial load (Jan-Jun 2022)
 
+![](img/diagram-bruin-run1.png){width="70%"}
+
 ```bash
-bruin run --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.yml
+bruin run --config-file .bruin.yml --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.yml
 ```
 
 ::: {.callout-note collapse="true" title="What --full-refresh does"}
@@ -661,7 +663,7 @@ bruin run --full-refresh --start-date 2022-01-01 --end-date 2022-07-01 pipeline.
 ### Query: 6 months
 
 ```bash
-bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
 ```
 
 **Expected:** 6 rows (Jan-Jun 2022), each with `n_reviews`, `avg_rating`, `unique_users`, `unique_products`.
@@ -677,8 +679,10 @@ ls -lh data/                          # two files now
 
 ### Run 2: incremental update (Jul-Dec 2022)
 
+![](img/diagram-bruin-run2.png){width="80%"}
+
 ```bash
-bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+bruin run --config-file .bruin.yml --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 ```
 
 ::: {.callout-tip collapse="true" title="After: what to highlight"}
@@ -695,12 +699,14 @@ bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 ### Verify: 12 months, Jan-Jun untouched
 
 ```bash
-bruin query --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
+bruin query --config-file .bruin.yml --c duckdb-default --q "SELECT * FROM monthly_summary ORDER BY review_month"
 ```
 
 **Expected:** 12 rows. Jan-Jun values **identical** to Run 1. Jul-Dec are new.
 
 ### Run 3 (optional): break a quality check
+
+![](img/diagram-bruin-run3-fail.png){width="70%"}
 
 ::: {.callout-important icon="false" title="Edit in VS Code"}
 Open `assets/raw_reviews.sql`. In `accepted_values` for rating, remove `5`:
@@ -714,7 +720,7 @@ Open `assets/raw_reviews.sql`. In `accepted_values` for rating, remove `5`:
 :::
 
 ```bash
-bruin run --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
+bruin run --config-file .bruin.yml --start-date 2022-07-01 --end-date 2023-01-01 pipeline.yml
 ```
 
 ::: {.callout-tip collapse="true" title="After: what to highlight"}

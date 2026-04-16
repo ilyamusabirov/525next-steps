@@ -1,0 +1,36 @@
+@startuml diagram-bruin-run2
+scale 1.5
+skinparam defaultFontSize 11
+skinparam ActivityBackgroundColor #e3f2fd
+skinparam ActivityBorderColor #1565c0
+
+title Run 2: Incremental Update  (Jul-Dec 2022)
+
+start
+:New parquet file arrives in data/\n**2 files, 2000 reviews total** (Jan-Dec 2022);
+
+:**raw_reviews**\nReads all parquet files (both H1 + H2)\nReplaces the table: now **2000 rows**;
+note right
+  Same 3 quality checks as Run 1.
+  All pass (data is clean).
+end note
+
+:**monthly_summary**\nGROUP BY month, filter to **Jul-Dec only**\n(the new date range from the CLI);
+note right
+  **delete+insert** does three things:
+  1. Run the query: produces Jul-Dec rows
+  2. DELETE Jul-Dec from the table
+     (they did not exist, so this is a no-op)
+  3. INSERT the 6 new rows
+
+  **Jan-Jun rows are never touched.**
+  They survive because the query
+  only returned Jul-Dec months.
+end note
+
+:Result: **12 rows** in monthly_summary
+| Jan | Feb | Mar | Apr | May | Jun |  //unchanged from Run 1//
+| Jul | Aug | Sep | Oct | Nov | Dec |  //new//;
+stop
+
+@enduml

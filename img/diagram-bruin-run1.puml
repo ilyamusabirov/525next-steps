@@ -1,0 +1,34 @@
+@startuml diagram-bruin-run1
+scale 1.5
+skinparam defaultFontSize 11
+skinparam ActivityBackgroundColor #e3f2fd
+skinparam ActivityBorderColor #1565c0
+
+title Run 1: Initial Load  (Jan-Jun 2022)
+
+start
+:1 parquet file in data/\n**1080 reviews** (Jan-Jun 2022);
+
+:**raw_reviews**\nReads all parquet files\nCreates a table with every review;
+note right
+  Bruin runs **3 quality checks**
+  before anything downstream can start:
+
+  Is every rating non-null?
+  Is every rating in [1, 2, 3, 4, 5]?
+  Is every review_date non-null?
+end note
+
+:**monthly_summary**\nGROUP BY month, filter to Jan-Jun\n(the date range we passed on the CLI)\nStrategy: **delete+insert**;
+note right
+  **3 more checks** on the output:
+
+  Is every review_month non-null?
+  Is every review_month unique?
+  Is every n_reviews positive?
+end note
+
+:Result: **6 rows** in monthly_summary\n| Jan | Feb | Mar | Apr | May | Jun |;
+stop
+
+@enduml
