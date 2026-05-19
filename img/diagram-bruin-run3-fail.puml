@@ -3,31 +3,49 @@ scale 1.5
 skinparam defaultFontSize 11
 skinparam ActivityBackgroundColor #e3f2fd
 skinparam ActivityBorderColor #1565c0
+skinparam DiamondBackgroundColor #fff9c4
+skinparam DiamondBorderColor #f0c040
+skinparam PartitionBackgroundColor #fafafa
+skinparam PartitionBorderColor #90a4ae
 
 title Run 3: What Happens When a Quality Check Fails?
 
 start
-:We edit raw_reviews.sql:\nremove **5** from accepted_values\nso the check becomes [1, 2, 3, 4];
+:Edit raw_reviews.sql:\nremove **5** from accepted_values\nso the check becomes [1, 2, 3, 4];
 
-:**raw_reviews**\nTable created successfully\n(the SQL itself ran fine);
-note right
-  **Quality checks**
-  rating: not_null  ✓
-  rating: accepted_values [1,2,3,4]  **FAIL**
-  //reviews with rating=5 exist//
-  //but 5 is no longer in the list//
-  review_date: not_null  ✓
-end note
+partition "Asset: **raw_reviews**" {
+  :Execute SQL\nTable created successfully\n(the SQL itself ran fine); <<#c8e6c9>>
 
-:**monthly_summary: UPSTREAM FAILED**\nBruin refuses to run it\nbecause raw_reviews failed a check;
-note right
-  The quality gate caught a problem
-  **before** it reached the summary.
+  fork
+    :rating\nnot_null ✓; <<#c8e6c9>>
+  fork again
+    :rating\naccepted_values [1,2,3,4]\n**FAIL**; <<#ffcdd2>>
+    note right
+      Reviews with rating = 5 exist
+      but 5 is no longer in the list.
+    end note
+  fork again
+    :review_date\nnot_null ✓; <<#c8e6c9>>
+  end fork
 
-  In a folder-of-scripts world,
-  the summary would silently
-  compute on bad data.
-end note
+  if (all checks pass?) then ("")
+  else (✗ check failed)
+    :raw_reviews: **CHECKS FAILED**; <<#ffcdd2>>
+  endif
+}
+
+partition "Asset: **monthly_summary**" {
+  :/**UPSTREAM FAILED**\nBruin refuses to run this asset\nbecause raw_reviews failed a check/; <<#ffcdd2>>
+  note right
+    The quality gate caught a problem
+    **before** it reached the summary.
+
+    In a folder-of-scripts world,
+    the summary would silently
+    compute on bad data.
+  end note
+}
+
 stop
 
 @enduml

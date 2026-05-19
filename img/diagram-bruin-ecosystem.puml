@@ -1,0 +1,61 @@
+@startuml diagram-bruin-ecosystem
+scale 1.5
+skinparam defaultFontSize 12
+skinparam RectangleBorderColor #888
+skinparam RectangleFontSize 12
+skinparam ArrowColor #555
+skinparam ArrowThickness 2
+skinparam Padding 6
+
+title Bruin Pipeline Ecosystem
+
+' ── SOURCES (top row) ────────────────────────────────────────────────
+
+rectangle "**Databases**\nPostgres · MySQL\nMongoDB · Oracle" as src_db #bbdefb
+rectangle "**SaaS / APIs**\nShopify · Stripe · Salesforce\nGoogle Sheets · Slack · GitHub" as src_saas #bbdefb
+rectangle "**Files / Storage**\nS3 · CSV · Parquet" as src_files #bbdefb
+
+src_db    -[hidden]right-> src_saas
+src_saas  -[hidden]right-> src_files
+
+' ── BRUIN CORE ───────────────────────────────────────────────────────
+
+rectangle "  **ingestr**: 50+ connectors · YAML config · typing preserved  " as ingestr #c8e6c9
+
+rectangle "**Transformation**\nSQL · Python · R\neach asset = one file" as transform #c8e6c9
+rectangle "**Quality gates**\nnot_null · unique\naccepted_values\nblocks downstream" as checks #c8e6c9
+rectangle "**Incremental strategies**\ncreate+replace · append\ndelete+insert · merge" as strats #c8e6c9
+
+transform -[hidden]right-> checks
+checks    -[hidden]right-> strats
+
+rectangle "  **Compute engines**: DuckDB · BigQuery · Snowflake · Postgres · EMR Spark · Databricks  " as engines #c8e6c9
+
+' ── DESTINATIONS (bottom row) ────────────────────────────────────────
+
+rectangle "**Data warehouses**\nBigQuery · Snowflake\nRedshift · Databricks" as dst_wh #ffe0b2
+rectangle "**Databases**\nPostgres · ClickHouse\nDuckDB · MotherDuck" as dst_db #ffe0b2
+rectangle "**Files / Storage**\nS3 · Parquet · CSV" as dst_files #ffe0b2
+
+dst_wh    -[hidden]right-> dst_db
+dst_db    -[hidden]right-> dst_files
+
+' ── VERTICAL FLOW ───────────────────────────────────────────────────
+
+src_db    ---> ingestr
+src_saas  ---> ingestr
+src_files ---> ingestr
+
+ingestr   ---> transform
+ingestr   ---> checks
+ingestr   ---> strats
+
+transform ---> engines
+checks    ---> engines
+strats    ---> engines
+
+engines   ---> dst_wh
+engines   ---> dst_db
+engines   ---> dst_files
+
+@enduml

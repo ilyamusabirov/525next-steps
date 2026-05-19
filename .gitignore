@@ -8,7 +8,7 @@ __pycache__/
 .venv/
 
 # DuckDB
-*.db
+#*.db
 *.db.wal
 
 # Data (downloaded, not committed)
@@ -36,11 +36,10 @@ weather.db
 .netlify
 
 # Root .bruin.yml only (lab-specific configs must be committed)
-/.bruin.yml
+#/.bruin.yml
 logs/runs
 logs/*.log
 *.py[cod]
 logs/queries
 .env
-
-.bruin.yml
+#.bruin.yml

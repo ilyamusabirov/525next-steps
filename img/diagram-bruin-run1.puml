@@ -3,32 +3,60 @@ scale 1.5
 skinparam defaultFontSize 11
 skinparam ActivityBackgroundColor #e3f2fd
 skinparam ActivityBorderColor #1565c0
+skinparam DiamondBackgroundColor #fff9c4
+skinparam DiamondBorderColor #f0c040
+skinparam PartitionBackgroundColor #fafafa
+skinparam PartitionBorderColor #90a4ae
 
-title Run 1: Initial Load  (Jan-Jun 2022)
+title Run 1: Initial Load (Jan-Jun 2022)
 
 start
 :1 parquet file in data/\n**1080 reviews** (Jan-Jun 2022);
 
-:**raw_reviews**\nReads all parquet files\nCreates a table with every review;
-note right
-  Bruin runs **3 quality checks**
-  before anything downstream can start:
+partition "Asset: **raw_reviews**  (materialization: table)" {
+  :Execute SQL\nSELECT * FROM read_parquet('data/*.parquet')\n→ CREATE TABLE raw_reviews;
 
-  Is every rating non-null?
-  Is every rating in [1, 2, 3, 4, 5]?
-  Is every review_date non-null?
-end note
+  fork
+    :rating\n**not_null**;
+  fork again
+    :rating\n**accepted_values**\n[1, 2, 3, 4, 5];
+  fork again
+    :review_date\n**not_null**;
+  end fork
 
-:**monthly_summary**\nGROUP BY month, filter to Jan-Jun\n(the date range we passed on the CLI)\nStrategy: **delete+insert**;
-note right
-  **3 more checks** on the output:
+  if (all checks pass?) then (✓ pass)
+  else (✗ fail)
+    :raw_reviews **FAILED**\nDownstream blocked; <<#ffcdd2>>
+    kill
+  endif
+}
 
-  Is every review_month non-null?
-  Is every review_month unique?
-  Is every n_reviews positive?
-end note
+partition "Asset: **monthly_summary**  (strategy: delete+insert)" {
+  :Execute SQL\nGROUP BY month\nWHERE date ∈ [Jan-Jun]\n→ 6 rows;
+  note right
+    **--full-refresh** on first run:
+    creates the table from scratch.
+    {{ start_date }} = 2022-01-01
+    {{ end_date }}   = 2022-07-01
+  end note
 
-:Result: **6 rows** in monthly_summary\n| Jan | Feb | Mar | Apr | May | Jun |;
+  fork
+    :review_month\n**not_null**;
+  fork again
+    :review_month\n**unique**;
+  fork again
+    :n_reviews\n**positive**;
+  end fork
+
+  if (all checks pass?) then (✓ pass)
+  else (✗ fail)
+    :monthly_summary **FAILED**; <<#ffcdd2>>
+    kill
+  endif
+}
+
+:Result: **6 rows** in monthly_summary
+| Jan | Feb | Mar | Apr | May | Jun |; <<#c8e6c9>>
 stop
 
 @enduml

@@ -3,34 +3,57 @@ scale 1.5
 skinparam defaultFontSize 11
 skinparam ActivityBackgroundColor #e3f2fd
 skinparam ActivityBorderColor #1565c0
+skinparam DiamondBackgroundColor #fff9c4
+skinparam DiamondBorderColor #f0c040
+skinparam PartitionBackgroundColor #fafafa
+skinparam PartitionBorderColor #90a4ae
 
-title Run 2: Incremental Update  (Jul-Dec 2022)
+title Run 2: Incremental Update (Jul-Dec 2022)
 
 start
 :New parquet file arrives in data/\n**2 files, 2000 reviews total** (Jan-Dec 2022);
 
-:**raw_reviews**\nReads all parquet files (both H1 + H2)\nReplaces the table: now **2000 rows**;
-note right
-  Same 3 quality checks as Run 1.
-  All pass (data is clean).
-end note
+partition "Asset: **raw_reviews**  (materialization: table)" {
+  :Execute SQL\nReads ALL parquet files (both H1 + H2)\n→ Replaces table: now **2000 rows**;
+  note right
+    Same 3 quality checks as Run 1.
+    All pass (data is clean).
+  end note
 
-:**monthly_summary**\nGROUP BY month, filter to **Jul-Dec only**\n(the new date range from the CLI);
-note right
-  **delete+insert** does three things:
-  1. Run the query: produces Jul-Dec rows
-  2. DELETE Jul-Dec from the table
-     (they did not exist, so this is a no-op)
-  3. INSERT the 6 new rows
+  fork
+    :rating: not_null ✓; <<#c8e6c9>>
+  fork again
+    :rating: accepted_values ✓; <<#c8e6c9>>
+  fork again
+    :review_date: not_null ✓; <<#c8e6c9>>
+  end fork
+}
 
-  **Jan-Jun rows are never touched.**
-  They survive because the query
-  only returned Jul-Dec months.
-end note
+partition "Asset: **monthly_summary**  (strategy: delete+insert)" {
+  :Execute SQL\nGROUP BY month\nWHERE date ∈ [Jul-Dec]\n→ 6 new rows;
+
+  note right
+    **delete+insert** does three things:
+    1. Run the query (produces Jul-Dec rows)
+    2. DELETE Jul-Dec from the table
+       (they did not exist: no-op)
+    3. INSERT the 6 new rows
+
+    **Jan-Jun rows are never touched.**
+  end note
+
+  fork
+    :review_month: not_null ✓; <<#c8e6c9>>
+  fork again
+    :review_month: unique ✓; <<#c8e6c9>>
+  fork again
+    :n_reviews: positive ✓; <<#c8e6c9>>
+  end fork
+}
 
 :Result: **12 rows** in monthly_summary
-| Jan | Feb | Mar | Apr | May | Jun |  //unchanged from Run 1//
-| Jul | Aug | Sep | Oct | Nov | Dec |  //new//;
+| Jan | Feb | Mar | Apr | May | Jun |  //unchanged//
+| Jul | Aug | Sep | Oct | Nov | Dec |  //new//; <<#c8e6c9>>
 stop
 
 @enduml
